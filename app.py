@@ -334,20 +334,29 @@ def ensure_result_columns(df):
 
 def india_now():
     """
-    Uses system local time.
-    For a machine running in India this is directly correct.
+    Always India Standard Time (IST, UTC+5:30).
+    Required on Streamlit Cloud / any UTC server so market hours are correct.
     """
-    return datetime.now()
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Kolkata"))
+    except Exception:
+        try:
+            import pytz
+            return datetime.now(pytz.timezone("Asia/Kolkata"))
+        except Exception:
+            # Fixed offset fallback UTC+5:30
+            from datetime import timezone, timedelta
+            return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 
 
 def nse_market_open_now():
+    """NSE cash market: Mon–Fri 09:15–15:30 IST (simple session; ignores special holidays)."""
     now = india_now()
-
+    # weekday() on aware datetime is fine
     if now.weekday() >= 5:
         return False
-
     current = now.time()
-
     return (
         current >= dt_time(9, 15)
         and current <= dt_time(15, 30)
@@ -355,11 +364,14 @@ def nse_market_open_now():
 
 
 def market_status_text():
-
+    now = india_now()
+    try:
+        ist_label = now.strftime("%H:%M IST")
+    except Exception:
+        ist_label = ""
     if nse_market_open_now():
-        return "🟢 NSE MARKET OPEN"
-
-    return "🔴 NSE MARKET CLOSED"
+        return f"🟢 NSE MARKET OPEN · {ist_label}".strip()
+    return f"🔴 NSE MARKET CLOSED · {ist_label}".strip()
 
 
 # ============================================================
