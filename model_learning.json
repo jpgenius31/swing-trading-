@@ -1,0 +1,118 @@
+{
+  "pattern_multipliers": {
+    "RSI_BULL_DIV": 1.136,
+    "MY_STRATEGY_DIV": 1.136,
+    "Bullish Engulfing": 0.4,
+    "Higher High / Higher Low": 0.49,
+    "Lower High / Lower Low": 0.4,
+    "Bullish Marubozu": 0.4,
+    "Bearish Marubozu": 0.4,
+    "Inside Bar": 0.64,
+    "Outside Bar": 0.4,
+    "Breakout High": 0.43
+  },
+  "pattern_stats": {
+    "Bullish Engulfing": {
+      "n": 8,
+      "win_rate": 0.0
+    },
+    "Higher High / Higher Low": {
+      "n": 42,
+      "win_rate": 7.1
+    },
+    "Lower High / Lower Low": {
+      "n": 3,
+      "win_rate": 0.0
+    },
+    "Bullish Marubozu": {
+      "n": 35,
+      "win_rate": 0.0
+    },
+    "Bearish Marubozu": {
+      "n": 3,
+      "win_rate": 0.0
+    },
+    "Inside Bar": {
+      "n": 5,
+      "win_rate": 20.0
+    },
+    "Outside Bar": {
+      "n": 8,
+      "win_rate": 0.0
+    },
+    "Breakout High": {
+      "n": 36,
+      "win_rate": 2.8
+    }
+  },
+  "pred_bucket_stats": {
+    "pred_60_70": {
+      "n": 11,
+      "win_rate": 0.0,
+      "lo": 60,
+      "hi": 70
+    },
+    "pred_70_80": {
+      "n": 4,
+      "win_rate": 25.0,
+      "lo": 70,
+      "hi": 80
+    },
+    "pred_80_plus": {
+      "n": 73,
+      "win_rate": 12.3,
+      "lo": 80,
+      "hi": 101
+    }
+  },
+  "risk_stats": {
+    "LOW": {
+      "n": 4,
+      "win_rate": 25.0
+    },
+    "MEDIUM": {
+      "n": 32,
+      "win_rate": 15.6
+    },
+    "HIGH": {
+      "n": 50,
+      "win_rate": 6.0
+    }
+  },
+  "call_stats": {
+    "BUY": {
+      "n": 75,
+      "win_rate": 13.3
+    },
+    "HOLD": {
+      "n": 13,
+      "win_rate": 0.0
+    }
+  },
+  "lessons": [
+    "Overall decided win rate (target vs stop): **11.4%** on 88 closed trades. Model now weights patterns and prediction zones using this history.",
+    "RSI bullish divergence training: 6 examples · good-weight 4 / bad 3 → pattern multiplier ×1.136 · My Strategy score boost +13",
+    "Pattern rule locked: PRICE lower-low + RSI higher-low (same swing bars), fresh only (not 2–3 days after bounce). RELIANCE/COALINDIA-style charts are the template.",
+    "BUY calls historically win only ~13% — be stricter on filters.",
+    "HOLD calls historically win only ~0% — be stricter on filters.",
+    "Prediction 60–70% zone wins only ~0% — reduce size / skip weak ones.",
+    "Prediction 70–80% zone wins only ~25% — reduce size / skip weak ones.",
+    "Prediction 80–101% zone wins only ~12% — reduce size / skip weak ones.",
+    "HIGH risk wins only ~6% historically — avoid unless exceptional.",
+    "Pattern **Bullish Engulfing** (bullish): historical win rate ~0% over 8 closed trades → weight multiplier 0.40x. Buyers fully overpowered the prior session’s sellers.",
+    "Pattern **Higher High / Higher Low** (bullish): historical win rate ~7% over 42 closed trades → weight multiplier 0.49x. Uptrend structure — demand is stepping up.",
+    "Pattern **Lower High / Lower Low** (bearish): historical win rate ~0% over 3 closed trades → weight multiplier 0.40x. Downtrend structure — supply is in control.",
+    "Pattern **Bullish Marubozu** (bullish): historical win rate ~0% over 35 closed trades → weight multiplier 0.40x. Strong conviction buying with little wick rejection.",
+    "Pattern **Bearish Marubozu** (bearish): historical win rate ~0% over 3 closed trades → weight multiplier 0.40x. Strong conviction selling with little wick rejection.",
+    "Pattern **Inside Bar** (neutral): historical win rate ~20% over 5 closed trades → weight multiplier 0.64x. Volatility compression — breakout often follows.",
+    "Pattern **Outside Bar** (context): historical win rate ~0% over 8 closed trades → weight multiplier 0.40x. Range expansion; can mark reversal or acceleration.",
+    "Pattern **Breakout High** (bullish): historical win rate ~3% over 36 closed trades → weight multiplier 0.43x. Close above recent range high — demand broke supply."
+  ],
+  "sample_closed": 88,
+  "sample_wins": 10,
+  "sample_losses": 78,
+  "rsi_bull_div_multiplier": 1.136,
+  "my_strategy_boost": 13,
+  "overall_win_rate": 11.4,
+  "updated_at": "2026-09-23 09:38:58"
+}
