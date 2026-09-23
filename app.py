@@ -70,7 +70,7 @@ st.set_page_config(
     page_title="NSE V12 Stock Dashboard",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",  # collapsed on small screens → better mobile
 )
 
 
@@ -132,24 +132,27 @@ st.markdown(
         padding: 12px;
     }
 
+    /* Mobile-first readability */
     @media (max-width: 768px) {
-
         .block-container {
-            padding-left: 0.6rem;
-            padding-right: 0.6rem;
+            padding-left: 0.45rem !important;
+            padding-right: 0.45rem !important;
+            padding-top: 0.5rem !important;
+            max-width: 100% !important;
         }
-
-        h1 {
-            font-size: 1.65rem !important;
+        h1 { font-size: 1.35rem !important; line-height: 1.25 !important; }
+        h2 { font-size: 1.15rem !important; }
+        h3 { font-size: 1.05rem !important; }
+        p, label, .stMarkdown { font-size: 0.95rem !important; }
+        div[data-testid="stMetricValue"] { font-size: 1.15rem !important; }
+        div[data-testid="stMetricLabel"] { font-size: 0.75rem !important; }
+        .stButton > button {
+            min-height: 2.75rem !important;
+            font-size: 0.95rem !important;
+            width: 100% !important;
         }
-
-        h2 {
-            font-size: 1.35rem !important;
-        }
-
-        h3 {
-            font-size: 1.15rem !important;
-        }
+        [data-testid="stDataFrame"] { font-size: 0.8rem !important; }
+        section[data-testid="stSidebar"] { min-width: 100% !important; }
     }
 
     </style>
@@ -12750,13 +12753,52 @@ def history_success_breakdown(history: pd.DataFrame) -> pd.DataFrame:
 
 
 
+def dedupe_history_same_day(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    One row per stock per calendar day (and Call Source if present).
+    Keeps latest prediction time that day — removes same-day duplicate trades.
+    """
+    if df is None or df.empty or "Stock" not in df.columns:
+        return df if df is not None else pd.DataFrame()
+    x = df.copy()
+    x["Stock"] = (
+        x["Stock"].astype(str).str.upper().str.replace(".NS", "", regex=False).str.strip()
+    )
+    if "Prediction Date" in x.columns:
+        x["_pdt"] = pd.to_datetime(x["Prediction Date"], errors="coerce")
+        x["_day"] = x["_pdt"].dt.strftime("%Y-%m-%d")
+    else:
+        x["_day"] = ""
+        x["_pdt"] = pd.NaT
+    if "Call Source" not in x.columns:
+        x["Call Source"] = "SCAN"
+    x["_src"] = x["Call Source"].astype(str).str.upper().str.strip()
+    # Prefer closed outcomes over pending when same day duplicates
+    def _rank_result(s):
+        u = str(s).upper()
+        if "TARGET ACHIEVED" in u:
+            return 3
+        if "STOP LOSS" in u:
+            return 2
+        if "HOLDING PERIOD" in u:
+            return 1
+        return 0
+    x["_rr"] = x["Result"].map(_rank_result) if "Result" in x.columns else 0
+    x = x.sort_values(
+        by=[c for c in ["_day", "Stock", "_src", "_rr", "_pdt"] if c in x.columns],
+        ascending=[True, True, True, False, False],
+    )
+    x = x.drop_duplicates(subset=["Stock", "_day", "_src"], keep="first")
+    return x.drop(columns=[c for c in ["_pdt", "_day", "_src", "_rr"] if c in x.columns]).reset_index(drop=True)
+
+
 def show_history():
     """Past Predictions — Strategy/Sure/High-conv only; success on those predicted stocks."""
 
     st.title("🕐 PAST PREDICTIONS")
     st.caption(
         "**Only Strategy + Sure Call + High conviction + Precision** are shown and scored here. "
-        "Bulk SCAN BUYs are excluded so success rate matches real quality predictions. "
+        "Same stock on the **same day** appears **once** (duplicates removed). "
         "Healthy swing book: **~40–55%** targets among closed target-vs-stop outcomes."
     )
 
@@ -12778,23 +12820,36 @@ def show_history():
                     "(or Sure Call → Generate) first, then click Import again."
                 )
 
-    # Only evaluate when user asks — keeps tab switch fast
+    # Auto-learn once per session (light) + full eval only on button
+    if not st.session_state.get("_auto_learned_hist"):
+        try:
+            learn_from_history(min_closed=3)
+            st.session_state._auto_learned_hist = True
+        except Exception:
+            pass
+
     if do_eval or force_eval:
         with st.spinner("Updating prediction outcomes + learning from mistakes..."):
             try:
                 evaluate_history(force_all=bool(force_eval))
                 refresh_history_current_prices(max_stocks=40)
-                learn_from_history(min_closed=5)
+                learn_from_history(min_closed=3)
             except Exception as e:
                 st.warning(f"Evaluation note: {e}")
         st.session_state._last_hist_eval = datetime.now()
+        st.session_state._auto_learned_hist = True
 
     history_all = normalize_history_df(load_history())
-    # Diagnostics so user sees why STRATEGY might be missing
     if history_all is not None and not history_all.empty and "Call Source" in history_all.columns:
         vc = history_all["Call Source"].astype(str).str.upper().value_counts().head(8)
         st.caption("History Call Source counts: " + ", ".join(f"{k}:{v}" for k, v in vc.items()))
     history = quality_history_only(history_all)
+    # Unique stock per day — no same-day duplicate trades
+    before_n = len(history) if history is not None else 0
+    history = dedupe_history_same_day(history)
+    after_n = len(history) if history is not None else 0
+    if before_n > after_n:
+        st.info(f"Removed **{before_n - after_n}** same-day duplicate rows · showing **{after_n}** unique stock-days.")
     stats = overall_statistics()
 
     st.subheader("📊 Success rate — Sure / Strategy predictions only")
@@ -14683,24 +14738,14 @@ for key, value in defaults.items():
 # LOAD SAVED RESULT
 # ============================================================
 
-if (
-    st.session_state.results.empty
-    and
-    RESULT_FILE.exists()
-):
-
+# Load last full-market scan from disk so phone / other browser
+# does NOT need to re-scan (same app instance / shared latest_results.csv).
+if st.session_state.results.empty and RESULT_FILE.exists():
     try:
-
-        saved = pd.read_csv(
-            RESULT_FILE
-        )
-
+        saved = pd.read_csv(RESULT_FILE)
         if not saved.empty:
-
-            st.session_state.results = (
-                saved
-            )
-
+            st.session_state.results = ensure_result_columns(saved)
+            st.session_state["_scan_loaded_from_disk"] = True
     except Exception:
         pass
 
@@ -14713,6 +14758,18 @@ with st.sidebar:
 
     st.header("📈 NSE V12")
     st.caption(market_status_text())
+    n_res = 0
+    try:
+        n_res = len(st.session_state.results) if st.session_state.results is not None else 0
+    except Exception:
+        n_res = 0
+    if n_res > 0:
+        st.success(f"Scan ready: **{n_res}** stocks (no need to re-scan)")
+        st.caption("Other tabs use this cache → faster switching.")
+    elif RESULT_FILE.exists():
+        st.warning("Scan file found but empty — run Full Market Scan once.")
+    else:
+        st.caption("Run **Full Market Scan** once; then switch tabs freely.")
     st.divider()
 
     if st.button("🏠 Dashboard", use_container_width=True):
