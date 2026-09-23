@@ -215,9 +215,63 @@ st.markdown(
             flex: 1 1 100% !important;
         }
     }
+
+    /* Smooth scroll + soft motion */
+    html { scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: no-preference) {
+        .block-container {
+            animation: nseFadeIn 0.35s ease-out;
+        }
+        @keyframes nseFadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
+)
+
+# Light swipe hint + scroll-to-top on mobile (does not block Streamlit)
+components.html(
+    """
+    <script>
+    (function () {
+      try {
+        const doc = window.parent.document;
+        const body = doc.body;
+        if (!body || body.dataset.nseSwipe === "1") return;
+        body.dataset.nseSwipe = "1";
+        let x0 = null;
+        body.addEventListener("touchstart", function (e) {
+          if (e.touches && e.touches.length === 1) x0 = e.touches[0].clientX;
+        }, { passive: true });
+        body.addEventListener("touchend", function (e) {
+          if (x0 === null) return;
+          const x1 = (e.changedTouches && e.changedTouches[0]) ? e.changedTouches[0].clientX : x0;
+          const dx = x1 - x0;
+          x0 = null;
+          // Swipe right near left edge → open sidebar (menu)
+          if (dx > 70 && (e.changedTouches[0].clientX - dx) < 40) {
+            const openBtn = doc.querySelector('[data-testid="stSidebarCollapsedControl"]')
+              || doc.querySelector('[data-testid="collapsedControl"]');
+            if (openBtn) openBtn.click();
+          }
+          // Swipe left while sidebar open → close
+          if (dx < -70) {
+            const side = doc.querySelector('section[data-testid="stSidebar"]');
+            if (side) {
+              const btn = side.querySelector("button");
+              if (btn) btn.click();
+            }
+          }
+        }, { passive: true });
+      } catch (err) {}
+    })();
+    </script>
+    """,
+    height=0,
+    width=0,
 )
 
 
@@ -8183,10 +8237,29 @@ def quality_history_only(history: pd.DataFrame) -> pd.DataFrame:
     return h[src.str.contains(QUALITY_SOURCE_PATTERN, regex=True, na=False)].copy()
 
 
+def _pnl_from_row(row) -> float:
+    """Approx return % for a history row (BUY: exit vs entry; SELL inverse)."""
+    ret = safe_float(row.get("Return %"), None)
+    if ret is not None and ret == ret and abs(ret) > 0:
+        return float(ret)
+    entry = safe_float(row.get("Entry"))
+    exit_px = safe_float(row.get("Exit Price"))
+    if entry <= 0:
+        return 0.0
+    if exit_px <= 0:
+        exit_px = safe_float(row.get("Current Price"))
+    if exit_px <= 0:
+        return 0.0
+    call = str(row.get("Call", "BUY")).upper()
+    if "SELL" in call:
+        return (entry - exit_px) / entry * 100.0
+    return (exit_px - entry) / entry * 100.0
+
+
 def overall_statistics():
     """
     Headline success = TARGET / (TARGET + STOP) on **Sure + Strategy + High conv** only.
-    Bulk SCAN is excluded so the rate matches real predicted quality trades (~40–55% typical).
+    Same-day duplicate stocks are collapsed so success is not inflated.
     """
     history = load_history()
     history = normalize_history_df(history)
@@ -8196,10 +8269,18 @@ def overall_statistics():
             "buy_decided": 0.0, "quality_decided": 0.0, "scan_decided": 0.0,
             "buy_wins": 0, "buy_losses": 0, "quality_wins": 0, "quality_losses": 0,
             "scan_wins": 0, "scan_losses": 0, "quality_n": 0,
+            "avg_win_pct": 0.0, "avg_loss_pct": 0.0, "sum_win_pct": 0.0, "sum_loss_pct": 0.0,
+            "unique_stocks": 0,
         })
         return empty
 
     quality = quality_history_only(history)
+    # Dedupe same stock-day so metrics match what user sees on the page
+    try:
+        quality = dedupe_history_same_day(quality, one_stock_per_day=True)
+    except Exception:
+        pass
+
     scan = history
     if "Call Source" in history.columns:
         src = history["Call Source"].astype(str).str.upper()
@@ -8207,14 +8288,12 @@ def overall_statistics():
 
     q_stats = _stats_from_history_slice(quality)
     s_stats = _stats_from_history_slice(scan)
-    # BUY subset of quality
     if not quality.empty and "Call" in quality.columns:
         buy_q = quality[quality["Call"].astype(str).str.upper().str.contains("BUY", na=False)]
     else:
         buy_q = quality
     buy_stats = _stats_from_history_slice(buy_q)
 
-    # Headline metrics from QUALITY only
     base = dict(q_stats)
     base["buy_decided"] = buy_stats["win_rate_decided"]
     base["buy_wins"] = buy_stats["wins"]
@@ -8228,11 +8307,29 @@ def overall_statistics():
     base["scan_wins"] = s_stats["wins"]
     base["scan_losses"] = s_stats["losses"]
     base["scan_n"] = len(scan)
-    # Primary success rate shown on Past Predictions
     decided = q_stats["wins"] + q_stats["losses"]
     base["success"] = q_stats["win_rate_decided"] if decided > 0 else 0.0
     base["win_rate_decided"] = base["success"]
     base["recommendations"] = len(quality)
+    base["unique_stocks"] = int(quality["Stock"].nunique()) if not quality.empty and "Stock" in quality.columns else len(quality)
+
+    # Profit / loss averages from closed quality rows
+    sum_w = sum_l = 0.0
+    n_w = n_l = 0
+    if not quality.empty and "Result" in quality.columns:
+        for _, r in quality.iterrows():
+            ru = str(r.get("Result", "")).upper()
+            pnl = _pnl_from_row(r)
+            if "TARGET ACHIEVED" in ru or ru == "WIN":
+                sum_w += pnl
+                n_w += 1
+            elif "STOP LOSS" in ru or ru == "LOSS":
+                sum_l += pnl
+                n_l += 1
+    base["sum_win_pct"] = round(sum_w, 2)
+    base["sum_loss_pct"] = round(sum_l, 2)
+    base["avg_win_pct"] = round(sum_w / n_w, 2) if n_w else 0.0
+    base["avg_loss_pct"] = round(sum_l / n_l, 2) if n_l else 0.0
     return base
 
 
@@ -12971,38 +13068,59 @@ def show_history():
         st.info(f"Removed **{before_n - after_n}** same-day duplicate rows · showing **{after_n}** unique stock-days.")
     stats = overall_statistics()
 
-    st.subheader("📊 Success rate — Sure / Strategy predictions only")
+    st.subheader("📊 Success rate — Sure / Strategy (unique stock-days)")
     st.caption(
-        "Formula: **Targets ÷ (Targets + Stops)**. Open trades not counted. "
-        f"Scan bulk excluded from score ({stats.get('scan_n', 0)} scan rows ignored)."
+        "Formula: **Targets ÷ (Targets + Stops)** after removing same-day duplicates. "
+        f"Scan bulk ignored ({stats.get('scan_n', 0)} rows). "
+        "Profit/loss = average return % on closed wins/stops."
     )
-    a, b, c, d, e = st.columns(5)
-    a.metric("Quality calls", stats.get("recommendations", 0) or stats.get("quality_n", 0))
-    b.metric("🎯 Target hits", stats.get("wins", 0) or stats.get("quality_wins", 0))
-    c.metric("🔴 Stop hits", stats.get("losses", 0) or stats.get("quality_losses", 0))
-    d.metric(
-        "Success rate",
-        f"{stats.get('success', 0)}%",
-        help="Targets/(Targets+Stops) on SURE|STRATEGY|HIGH_CONV|PRECISION only",
-    )
-    e.metric("Still open", stats.get("open", 0))
+    # Big success number first — easy to see
+    succ = float(stats.get("success") or 0)
     decided = int(stats.get("quality_wins") or stats.get("wins") or 0) + int(
         stats.get("quality_losses") or stats.get("losses") or 0
     )
+    tw = int(stats.get("wins", 0) or stats.get("quality_wins", 0))
+    tl = int(stats.get("losses", 0) or stats.get("quality_losses", 0))
+    st.markdown(
+        f"""
+        <div style="border-radius:14px;padding:16px 18px;margin:8px 0 12px 0;
+                    background:linear-gradient(135deg,#0f766e 0%,#134e4a 100%);
+                    border:1px solid #2dd4bf;">
+          <div style="color:#99f6e4;font-size:0.9rem;">SUCCESS RATIO (closed only)</div>
+          <div style="color:#f0fdfa;font-size:2.4rem;font-weight:800;line-height:1.1;">{succ:.1f}%</div>
+          <div style="color:#ccfbf1;font-size:0.95rem;margin-top:6px;">
+            🎯 {tw} targets &nbsp;·&nbsp; 🔴 {tl} stops &nbsp;·&nbsp; {decided} decided
+            &nbsp;·&nbsp; avg profit <b style="color:#4ade80;">{stats.get('avg_win_pct', 0):+.1f}%</b>
+            &nbsp;·&nbsp; avg loss <b style="color:#f87171;">{stats.get('avg_loss_pct', 0):+.1f}%</b>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    a, b, c, d, e, f = st.columns(6)
+    a.metric("Unique quality rows", stats.get("recommendations", 0) or stats.get("quality_n", 0))
+    b.metric("🎯 Target hits", tw)
+    c.metric("🔴 Stop hits", tl)
+    d.metric("Success rate", f"{succ}%")
+    e.metric("Still open", stats.get("open", 0))
+    f.metric("Unique stocks", stats.get("unique_stocks", 0))
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Avg profit (targets)", f"{stats.get('avg_win_pct', 0):+.2f}%")
+    p2.metric("Avg loss (stops)", f"{stats.get('avg_loss_pct', 0):+.2f}%")
+    p3.metric("Sum win% / Sum loss%", f"{stats.get('sum_win_pct', 0):+.1f} / {stats.get('sum_loss_pct', 0):+.1f}")
+
     if decided == 0:
         st.info(
             "No closed Strategy/Sure outcomes yet. Generate **Sure / Live strategy / High conviction**, "
             "then Force re-check after prices move — success % will appear (often ~40–55%)."
         )
-    elif 40 <= float(stats.get("success") or 0) <= 55:
-        st.success(
-            f"**{stats.get('success')}%** is inside the normal **40–55%** band for quality swing calls."
-        )
-    elif float(stats.get("success") or 0) > 55:
-        st.success(f"**{stats.get('success')}%** is strong on quality predicted stocks ({decided} decided).")
+    elif 40 <= succ <= 55:
+        st.success(f"**{succ}%** is inside the normal **40–55%** band for quality swing calls.")
+    elif succ > 55:
+        st.success(f"**{succ}%** is strong ({decided} decided · avg win {stats.get('avg_win_pct', 0):+.1f}%).")
     else:
         st.warning(
-            f"**{stats.get('success')}%** is below ~40% — favour High conv/Sure only and pause weak strategies."
+            f"**{succ}%** is below ~40% — favour High conv/Sure only and pause weak strategies."
         )
 
     # Learning panel
@@ -13611,30 +13729,52 @@ def show_history():
         except Exception:
             pred_date_fmt = str(row.get("Prediction Date", ""))
 
+        # Always compute P&L for display
+        pnl_pct = return_pct if return_pct else _pnl_from_row(row)
+        if abs(pnl_pct) < 1e-9 and entry > 0:
+            if "TARGET ACHIEVED" in result and target > 0:
+                pnl_pct = ((target - entry) / entry * 100) if "SELL" not in call else ((entry - target) / entry * 100)
+            elif "STOP LOSS" in result and stop > 0:
+                pnl_pct = ((stop - entry) / entry * 100) if "SELL" not in call else ((entry - stop) / entry * 100)
+        profit_rupees = entry * pnl_pct / 100.0 if entry else 0.0
+
         if "TARGET ACHIEVED" in result:
             badge, box = "🎯 TARGET ACHIEVED", "success-box"
+            pnl_line = f"<b style='color:#16a34a;'>Profit: {pnl_pct:+.2f}% (≈ ₹{profit_rupees:+,.2f} per share)</b>"
         elif "STOP LOSS HIT" in result:
             badge, box = "🔴 STOP LOSS HIT", "danger-box"
+            pnl_line = f"<b style='color:#dc2626;'>Loss: {pnl_pct:+.2f}% (≈ ₹{profit_rupees:+,.2f} per share)</b>"
         elif "HOLDING PERIOD" in result:
             badge, box = "⏰ HOLDING PERIOD COMPLETED", "watch-box"
+            pnl_line = f"<b>P&L at exit: {pnl_pct:+.2f}% (≈ ₹{profit_rupees:+,.2f} / share)</b>"
         else:
             badge, box = "⏳ OPEN / PENDING", "hold-box"
+            unreal = 0.0
+            if entry > 0 and cur > 0:
+                unreal = ((cur - entry) / entry * 100) if "SELL" not in call else ((entry - cur) / entry * 100)
+            pnl_line = f"<b>Unrealized: {unreal:+.2f}%</b>"
 
         if not result_detail or result_detail in ("", "nan", "None"):
             if "TARGET ACHIEVED" in result:
                 result_detail = (
-                    f"🎯 TARGET ACHIEVED\nTarget: ₹{target:,.2f}\n"
-                    f"Days Taken: {days_taken}\nProfit: {return_pct:+.2f}%"
+                    f"🎯 TARGET ACHIEVED\n"
+                    f"Target reached: ₹{target:,.2f}\n"
+                    f"Days Taken: {days_taken}\n"
+                    f"Profit: {pnl_pct:+.2f}%\n"
+                    f"Profit (₹/share): {profit_rupees:+,.2f}"
                 )
             elif "STOP LOSS HIT" in result:
                 result_detail = (
-                    f"🔴 STOP LOSS HIT\nStop: ₹{stop:,.2f}\n"
-                    f"Days Taken: {days_taken}\nLoss: {return_pct:.2f}%"
+                    f"🔴 STOP LOSS HIT\n"
+                    f"Stop hit: ₹{stop:,.2f}\n"
+                    f"Days Taken: {days_taken}\n"
+                    f"Loss: {pnl_pct:+.2f}%\n"
+                    f"Loss (₹/share): {profit_rupees:+,.2f}"
                 )
             elif "HOLDING PERIOD" in result:
                 result_detail = (
                     f"⏰ HOLDING PERIOD COMPLETED\nExit: ₹{exit_price:,.2f}\n"
-                    f"Date: {eval_date}"
+                    f"Date: {eval_date}\nP&L: {pnl_pct:+.2f}%"
                 )
             else:
                 cur_txt = f"₹{cur:,.2f}" if cur else "—"
@@ -13649,8 +13789,10 @@ def show_history():
 
         st.markdown(
             f"""
-            <div class="{box}" style="margin-bottom:12px;padding:14px;border-radius:10px;">
+            <div class="{box}" style="margin-bottom:12px;padding:14px;border-radius:10px;
+                 transition: transform 0.2s ease, box-shadow 0.2s ease;">
             <h4 style="margin:0 0 8px 0;">{stock} — {call} &nbsp; {badge}</h4>
+            <p style="margin:0 0 8px 0;">{pnl_line}</p>
             <p style="margin:0;line-height:1.6;">
             <b>Prediction Date:</b> {pred_date_fmt}<br>
             <b>Entry:</b> ₹{entry:,.2f}<br>
