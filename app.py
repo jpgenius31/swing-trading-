@@ -14984,41 +14984,94 @@ if st.session_state.results.empty and RESULT_FILE.exists():
 # ============================================================
 
 def inject_mobile_sidebar_close():
-    """After nav button, collapse sidebar on phone so the page is visible."""
+    """
+    After a sidebar nav tap on phone: force-hide the drawer so the new page
+    is visible without tapping the main area again.
+    """
     if not st.session_state.get("_collapse_sidebar"):
         return
     st.session_state["_collapse_sidebar"] = False
+    # Visible marker helps some WebViews run the script reliably
     components.html(
         """
+        <div id="nse-close-side" style="height:1px;overflow:hidden;opacity:0;">close</div>
         <script>
         (function () {
-          try {
-            const doc = window.parent.document;
-            if ((window.parent.innerWidth || 0) > 900) return;
-            const candidates = [
-              doc.querySelector('[data-testid="stSidebarCollapsedControl"]'),
-              doc.querySelector('[data-testid="collapsedControl"]'),
-              doc.querySelector('button[kind="header"]'),
-            ];
-            for (const el of candidates) {
-              if (el) { el.click(); return; }
-            }
-            const side = doc.querySelector('section[data-testid="stSidebar"]');
-            if (side) {
-              const btn = side.querySelector('button');
-              if (btn) btn.click();
-            }
-          } catch (e) {}
+          function closeSide() {
+            try {
+              var doc = window.parent.document;
+              var win = window.parent;
+              if ((win.innerWidth || 0) > 991) return;
+
+              function clickEl(el) {
+                if (!el) return false;
+                try {
+                  el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+                  el.click();
+                  return true;
+                } catch (e) { return false; }
+              }
+
+              // 1) Official collapse / close controls (Streamlit versions differ)
+              var sels = [
+                '[data-testid="stSidebarCollapseButton"]',
+                '[data-testid="stBaseButton-header"]',
+                '[data-testid="baseButton-header"]',
+                '[data-testid="stSidebarCollapsedControl"]',
+                '[data-testid="collapsedControl"]',
+                'button[kind="headerNoPadding"]',
+                'button[kind="header"]',
+                '[data-testid="stHeader"] button',
+              ];
+              for (var i = 0; i < sels.length; i++) {
+                var nodes = doc.querySelectorAll(sels[i]);
+                for (var j = 0; j < nodes.length; j++) {
+                  if (clickEl(nodes[j])) return;
+                }
+              }
+
+              // 2) Any button in sidebar chrome (often the « chevron)
+              var side = doc.querySelector('section[data-testid="stSidebar"]');
+              if (side) {
+                var buttons = side.querySelectorAll("button");
+                if (buttons.length && clickEl(buttons[0])) return;
+              }
+
+              // 3) Click main content — Streamlit closes overlay drawer on outside tap
+              var main = doc.querySelector('[data-testid="stAppViewContainer"]')
+                      || doc.querySelector(".main")
+                      || doc.querySelector('[data-testid="stMain"]');
+              if (main) clickEl(main);
+
+              // 4) Last resort: hide drawer visually on small screens
+              if (side) {
+                side.style.transform = "translateX(-100%)";
+                side.style.visibility = "hidden";
+                side.setAttribute("aria-expanded", "false");
+              }
+              var expanded = doc.querySelectorAll('[data-testid="stSidebar"]');
+              expanded.forEach(function (el) {
+                el.style.transform = "translateX(-100%)";
+              });
+            } catch (err) {}
+          }
+          // Run several times — Streamlit re-paints the sidebar after rerun
+          closeSide();
+          setTimeout(closeSide, 50);
+          setTimeout(closeSide, 150);
+          setTimeout(closeSide, 350);
+          setTimeout(closeSide, 700);
+          setTimeout(closeSide, 1200);
         })();
         </script>
         """,
-        height=0,
-        width=0,
+        height=1,
+        width=1,
     )
 
 
 def _sidebar_go(page_key: str):
-    """Click sidebar item → open that page immediately (no extra dropdown)."""
+    """Click sidebar item → open that page and hide mobile drawer."""
     st.session_state.page = page_key
     st.session_state["_collapse_sidebar"] = True
     st.rerun()
