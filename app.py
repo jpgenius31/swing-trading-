@@ -232,47 +232,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Light swipe hint + scroll-to-top on mobile (does not block Streamlit)
-components.html(
-    """
-    <script>
-    (function () {
-      try {
-        const doc = window.parent.document;
-        const body = doc.body;
-        if (!body || body.dataset.nseSwipe === "1") return;
-        body.dataset.nseSwipe = "1";
-        let x0 = null;
-        body.addEventListener("touchstart", function (e) {
-          if (e.touches && e.touches.length === 1) x0 = e.touches[0].clientX;
-        }, { passive: true });
-        body.addEventListener("touchend", function (e) {
-          if (x0 === null) return;
-          const x1 = (e.changedTouches && e.changedTouches[0]) ? e.changedTouches[0].clientX : x0;
-          const dx = x1 - x0;
-          x0 = null;
-          // Swipe right near left edge → open sidebar (menu)
-          if (dx > 70 && (e.changedTouches[0].clientX - dx) < 40) {
-            const openBtn = doc.querySelector('[data-testid="stSidebarCollapsedControl"]')
-              || doc.querySelector('[data-testid="collapsedControl"]');
-            if (openBtn) openBtn.click();
-          }
-          // Swipe left while sidebar open → close
-          if (dx < -70) {
-            const side = doc.querySelector('section[data-testid="stSidebar"]');
-            if (side) {
-              const btn = side.querySelector("button");
-              if (btn) btn.click();
-            }
-          }
-        }, { passive: true });
-      } catch (err) {}
-    })();
-    </script>
-    """,
-    height=0,
-    width=0,
-)
+# Swipe-to-open sidebar disabled (table scroll was opening menu on mobile).
 
 
 # ============================================================
@@ -15023,39 +14983,8 @@ if st.session_state.results.empty and RESULT_FILE.exists():
 # SIDEBAR
 # ============================================================
 
-# Page list for sidebar navigation (label shown → internal page key)
-NAV_MENU = [
-    ("Dashboard", "🏠 Dashboard"),
-    ("Nifty Analysis", "📈 NIFTY 50 Chart + Analysis"),
-    ("BankNifty Analysis", "🏦 BANK NIFTY Chart + Analysis"),
-    ("BUY Calls", "🟢 BUY Calls"),
-    ("SELL Calls", "🔴 SELL Calls"),
-    ("Sure Calls", "✅ Sure Call Desk"),
-    ("Strategy Lab", "🧪 Strategy Lab + Backtest"),
-    ("Find Stock", "🔍 Find Stock"),
-    ("Sector Analysis", "🏭 Sector Analysis"),
-    ("Holding Advisor", "📥 My Holding Advisor"),
-    ("Portfolio", "💼 My Portfolio"),
-    ("History", "🕐 Past Predictions"),
-    ("Trade Tracker", "🤖 Auto Trade Tracker"),
-    ("Paper Trading", "🧪 Dummy / Paper Backtest"),
-    ("Stock Analysis", "🔍 Analyze Stock"),
-]
-NAV_KEYS = [k for k, _ in NAV_MENU]
-NAV_LABELS = [lab for _, lab in NAV_MENU]
-NAV_LABEL_TO_KEY = {lab: k for k, lab in NAV_MENU}
-
-
-def navigate_to(page_key: str):
-    """Immediate page change + close mobile sidebar on next paint."""
-    if st.session_state.get("page") != page_key:
-        st.session_state.page = page_key
-        st.session_state["_collapse_sidebar"] = True
-        st.rerun()
-
-
 def inject_mobile_sidebar_close():
-    """After nav, collapse sidebar on phone so content is visible immediately."""
+    """After nav button, collapse sidebar on phone so the page is visible."""
     if not st.session_state.get("_collapse_sidebar"):
         return
     st.session_state["_collapse_sidebar"] = False
@@ -15065,18 +14994,15 @@ def inject_mobile_sidebar_close():
         (function () {
           try {
             const doc = window.parent.document;
-            const w = window.parent.innerWidth || 0;
-            if (w > 900) return;
-            // Try common Streamlit collapse controls
+            if ((window.parent.innerWidth || 0) > 900) return;
             const candidates = [
               doc.querySelector('[data-testid="stSidebarCollapsedControl"]'),
-              doc.querySelector('button[kind="header"]'),
               doc.querySelector('[data-testid="collapsedControl"]'),
+              doc.querySelector('button[kind="header"]'),
             ];
             for (const el of candidates) {
               if (el) { el.click(); return; }
             }
-            // Fallback: click chevron inside sidebar header
             const side = doc.querySelector('section[data-testid="stSidebar"]');
             if (side) {
               const btn = side.querySelector('button');
@@ -15091,11 +15017,18 @@ def inject_mobile_sidebar_close():
     )
 
 
+def _sidebar_go(page_key: str):
+    """Click sidebar item → open that page immediately (no extra dropdown)."""
+    st.session_state.page = page_key
+    st.session_state["_collapse_sidebar"] = True
+    st.rerun()
+
+
 with st.sidebar:
 
     st.header("📈 NSE V12")
     st.caption(market_status_text())
-    st.caption("📱 Select a page below → opens at once. Menu: **☰**")
+    st.caption("📱 Tap a button → that page opens. Open menu with **☰** only.")
     n_res = 0
     try:
         n_res = len(st.session_state.results) if st.session_state.results is not None else 0
@@ -15110,26 +15043,43 @@ with st.sidebar:
         st.caption("Run **Full Market Scan** once; then switch tabs freely.")
     st.divider()
 
-    # ---- Direct page selector (works best on mobile) ----
-    cur = st.session_state.get("page", "Dashboard")
-    try:
-        cur_idx = NAV_KEYS.index(cur)
-    except ValueError:
-        cur_idx = 0
-    picked = st.selectbox(
-        "📍 Go to page",
-        NAV_LABELS,
-        index=cur_idx,
-        key="nav_page_select",
-        help="Change selection to open that page immediately",
-    )
-    navigate_to(NAV_LABEL_TO_KEY.get(picked, "Dashboard"))
+    # Direct buttons only — no "Go to page" dropdown
+    if st.button("🏠 Dashboard", use_container_width=True, key="sb_dash"):
+        _sidebar_go("Dashboard")
 
-    st.markdown("**Quick taps**")
-    # Compact buttons still available — each jumps immediately
-    for key, label in NAV_MENU:
-        if st.button(label, key=f"nav_btn_{key}", use_container_width=True):
-            navigate_to(key)
+    st.markdown("**📊 Indices**")
+    if st.button("📈 NIFTY 50 Chart + Analysis", use_container_width=True, key="sb_nifty"):
+        _sidebar_go("Nifty Analysis")
+    if st.button("🏦 BANK NIFTY Chart + Analysis", use_container_width=True, key="sb_bn"):
+        _sidebar_go("BankNifty Analysis")
+
+    st.markdown("**📞 Calls**")
+    if st.button("🟢 BUY Calls", use_container_width=True, key="sb_buy"):
+        _sidebar_go("BUY Calls")
+    if st.button("🔴 SELL Calls", use_container_width=True, key="sb_sell"):
+        _sidebar_go("SELL Calls")
+    if st.button("✅ Sure Call Desk", use_container_width=True, key="sb_sure"):
+        _sidebar_go("Sure Calls")
+    if st.button("🧪 Strategy Lab + Backtest", use_container_width=True, key="sb_strat"):
+        _sidebar_go("Strategy Lab")
+
+    st.markdown("**🔎 Tools**")
+    if st.button("🔍 Find Stock", use_container_width=True, key="sb_find"):
+        _sidebar_go("Find Stock")
+    if st.button("🏭 Sector Analysis", use_container_width=True, key="sb_sec"):
+        _sidebar_go("Sector Analysis")
+    if st.button("📥 My Holding Advisor", use_container_width=True, key="sb_hold"):
+        _sidebar_go("Holding Advisor")
+    if st.button("💼 My Portfolio", use_container_width=True, key="sb_port"):
+        _sidebar_go("Portfolio")
+    if st.button("🕐 Past Predictions", use_container_width=True, key="sb_hist"):
+        _sidebar_go("History")
+    if st.button("🤖 Auto Trade Tracker", use_container_width=True, key="sb_tr"):
+        _sidebar_go("Trade Tracker")
+    if st.button("🧪 Dummy / Paper Backtest", use_container_width=True, key="sb_paper"):
+        _sidebar_go("Paper Trading")
+    if st.button("🔍 Analyze Stock", use_container_width=True, key="sb_an"):
+        _sidebar_go("Stock Analysis")
 
     st.divider()
 
