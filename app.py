@@ -70,23 +70,24 @@ st.set_page_config(
     page_title="NSE V12 Stock Dashboard",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="auto",  # collapsed on small screens → better mobile
+    initial_sidebar_state="collapsed",  # better on phone — open menu with ☰
 )
 
 
 # ============================================================
-# CSS
+# CSS — desktop + strong mobile visibility
 # ============================================================
 
 st.markdown(
     """
     <style>
-
+    /* Base */
     .block-container {
         padding-top: 1rem;
-        padding-bottom: 2rem;
+        padding-bottom: 2.5rem;
+        padding-left: 1.5rem;
+        padding-right: 1.5rem;
     }
-
     .stock-card {
         border: 1px solid #dddddd;
         border-radius: 14px;
@@ -94,67 +95,126 @@ st.markdown(
         margin-bottom: 12px;
         background: white;
     }
+    .small-text { font-size: 13px; color: #666666; }
+    .buy-box { border-left: 6px solid #1a9b5f; padding-left: 12px; }
+    .sell-box { border-left: 6px solid #d93025; padding-left: 12px; }
+    .hold-box { border-left: 6px solid #e0a800; padding-left: 12px; }
+    .watch-box { border-left: 6px solid #777777; padding-left: 12px; }
+    .danger-box { border: 1px solid #d93025; border-radius: 10px; padding: 12px; }
+    .success-box { border: 1px solid #1a9b5f; border-radius: 10px; padding: 12px; }
 
-    .small-text {
-        font-size: 13px;
-        color: #666666;
-    }
-
-    .buy-box {
-        border-left: 6px solid #1a9b5f;
-        padding-left: 12px;
-    }
-
-    .sell-box {
-        border-left: 6px solid #d93025;
-        padding-left: 12px;
-    }
-
-    .hold-box {
-        border-left: 6px solid #e0a800;
-        padding-left: 12px;
-    }
-
-    .watch-box {
-        border-left: 6px solid #777777;
-        padding-left: 12px;
-    }
-
-    .danger-box {
-        border: 1px solid #d93025;
-        border-radius: 10px;
-        padding: 12px;
-    }
-
-    .success-box {
-        border: 1px solid #1a9b5f;
-        border-radius: 10px;
-        padding: 12px;
-    }
-
-    /* Mobile-first readability */
-    @media (max-width: 768px) {
-        .block-container {
-            padding-left: 0.45rem !important;
-            padding-right: 0.45rem !important;
-            padding-top: 0.5rem !important;
-            max-width: 100% !important;
+    /* ===== PHONE / SMALL TABLET ===== */
+    @media (max-width: 900px) {
+        html, body, [data-testid="stAppViewContainer"] {
+            font-size: 16px !important;
+            -webkit-text-size-adjust: 100% !important;
         }
-        h1 { font-size: 1.35rem !important; line-height: 1.25 !important; }
-        h2 { font-size: 1.15rem !important; }
-        h3 { font-size: 1.05rem !important; }
-        p, label, .stMarkdown { font-size: 0.95rem !important; }
-        div[data-testid="stMetricValue"] { font-size: 1.15rem !important; }
-        div[data-testid="stMetricLabel"] { font-size: 0.75rem !important; }
-        .stButton > button {
-            min-height: 2.75rem !important;
+        .block-container {
+            padding: 0.4rem 0.55rem 5rem 0.55rem !important;
+            max-width: 100vw !important;
+        }
+        /* Headings */
+        h1 { font-size: 1.4rem !important; line-height: 1.2 !important; margin-bottom: 0.4rem !important; }
+        h2 { font-size: 1.2rem !important; line-height: 1.25 !important; }
+        h3, h4 { font-size: 1.05rem !important; }
+        p, span, label, .stMarkdown, .stCaption, [data-testid="stCaption"] {
             font-size: 0.95rem !important;
+            line-height: 1.4 !important;
+        }
+        /* Metrics — readable on small screens */
+        [data-testid="stMetric"] {
+            background: rgba(30,41,59,0.55);
+            border-radius: 10px;
+            padding: 8px 10px !important;
+            margin-bottom: 6px;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.25rem !important;
+            font-weight: 700 !important;
+        }
+        div[data-testid="stMetricLabel"] {
+            font-size: 0.78rem !important;
+            opacity: 0.9;
+        }
+        div[data-testid="stMetricDelta"] { font-size: 0.85rem !important; }
+        /* Full-width touch buttons */
+        .stButton > button, .stDownloadButton > button {
+            min-height: 3rem !important;
+            font-size: 1rem !important;
+            font-weight: 600 !important;
+            width: 100% !important;
+            border-radius: 10px !important;
+            padding: 0.55rem 0.75rem !important;
+        }
+        /* Inputs */
+        .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] {
+            min-height: 2.75rem !important;
+            font-size: 1rem !important;
+        }
+        /* Columns stack more cleanly */
+        [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 0.35rem !important;
+        }
+        [data-testid="stHorizontalBlock"] > div {
+            min-width: min(100%, 140px) !important;
+            flex: 1 1 140px !important;
+        }
+        /* Tables — horizontal scroll, larger text */
+        [data-testid="stDataFrame"],
+        [data-testid="stDataFrame"] table,
+        .stDataFrame {
+            font-size: 0.85rem !important;
             width: 100% !important;
         }
-        [data-testid="stDataFrame"] { font-size: 0.8rem !important; }
-        section[data-testid="stSidebar"] { min-width: 100% !important; }
+        [data-testid="stDataFrame"] {
+            overflow-x: auto !important;
+            -webkit-overflow-scrolling: touch !important;
+        }
+        /* Sidebar full width when open */
+        section[data-testid="stSidebar"] {
+            width: min(100vw, 320px) !important;
+            min-width: min(100vw, 280px) !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button {
+            min-height: 2.85rem !important;
+            margin-bottom: 0.25rem !important;
+        }
+        /* Expanders easier to tap */
+        .streamlit-expanderHeader, [data-testid="stExpander"] summary {
+            font-size: 1rem !important;
+            min-height: 2.75rem !important;
+            padding: 0.5rem 0.6rem !important;
+        }
+        /* Tabs */
+        button[data-baseweb="tab"] {
+            font-size: 0.9rem !important;
+            padding: 0.6rem 0.75rem !important;
+            min-height: 2.5rem !important;
+        }
+        /* Plotly charts */
+        .js-plotly-plot, .plotly {
+            max-width: 100% !important;
+        }
+        /* Reduce crowded element gaps */
+        [data-testid="stVerticalBlock"] > div { gap: 0.35rem !important; }
+        /* Alert / info boxes */
+        [data-testid="stAlert"] { font-size: 0.9rem !important; padding: 0.65rem !important; }
+        /* Radio / checkbox */
+        .stRadio label, .stCheckbox label { font-size: 0.95rem !important; }
+        /* Hide excess top chrome spacing */
+        header[data-testid="stHeader"] { background: transparent; }
     }
 
+    /* Very small phones */
+    @media (max-width: 400px) {
+        h1 { font-size: 1.2rem !important; }
+        div[data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+        [data-testid="stHorizontalBlock"] > div {
+            min-width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -12753,10 +12813,12 @@ def history_success_breakdown(history: pd.DataFrame) -> pd.DataFrame:
 
 
 
-def dedupe_history_same_day(df: pd.DataFrame) -> pd.DataFrame:
+def dedupe_history_same_day(df: pd.DataFrame, one_stock_per_day: bool = True) -> pd.DataFrame:
     """
-    One row per stock per calendar day (and Call Source if present).
-    Keeps latest prediction time that day — removes same-day duplicate trades.
+    Remove same-day duplicate trades.
+    one_stock_per_day=True → exactly ONE row per stock per calendar day
+    (merges sources/strategies into the kept row).
+    Priority: SURE > HIGH_CONV > PRECISION > STRATEGY > MY_STRATEGY > SCAN.
     """
     if df is None or df.empty or "Stock" not in df.columns:
         return df if df is not None else pd.DataFrame()
@@ -12773,23 +12835,80 @@ def dedupe_history_same_day(df: pd.DataFrame) -> pd.DataFrame:
     if "Call Source" not in x.columns:
         x["Call Source"] = "SCAN"
     x["_src"] = x["Call Source"].astype(str).str.upper().str.strip()
-    # Prefer closed outcomes over pending when same day duplicates
+
+    def _src_rank(s):
+        u = str(s).upper()
+        order = ["SURE", "HIGH_CONV", "PRECISION", "STRATEGY", "MY_STRATEGY", "SCAN"]
+        for i, name in enumerate(order):
+            if name in u:
+                return len(order) - i
+        return 0
+
     def _rank_result(s):
         u = str(s).upper()
-        if "TARGET ACHIEVED" in u:
+        if "TARGET ACHIEVED" in u or u == "WIN":
             return 3
-        if "STOP LOSS" in u:
+        if "STOP LOSS" in u or u == "LOSS":
             return 2
         if "HOLDING PERIOD" in u:
             return 1
         return 0
+
+    x["_sr"] = x["_src"].map(_src_rank)
     x["_rr"] = x["Result"].map(_rank_result) if "Result" in x.columns else 0
-    x = x.sort_values(
-        by=[c for c in ["_day", "Stock", "_src", "_rr", "_pdt"] if c in x.columns],
-        ascending=[True, True, True, False, False],
-    )
-    x = x.drop_duplicates(subset=["Stock", "_day", "_src"], keep="first")
-    return x.drop(columns=[c for c in ["_pdt", "_day", "_src", "_rr"] if c in x.columns]).reset_index(drop=True)
+
+    if one_stock_per_day:
+        # Collect all sources/strategies for the day before drop
+        def _join_unique(series):
+            parts = []
+            for v in series.astype(str):
+                v = v.strip()
+                if v and v.lower() not in ("nan", "none", ""):
+                    if v not in parts:
+                        parts.append(v)
+            return " · ".join(parts)
+
+        agg_src = (
+            x.groupby(["Stock", "_day"], dropna=False)["_src"]
+            .agg(_join_unique)
+            .rename("_all_sources")
+        )
+        if "Strategy" in x.columns:
+            agg_st = (
+                x.groupby(["Stock", "_day"], dropna=False)["Strategy"]
+                .agg(_join_unique)
+                .rename("_all_strategies")
+            )
+        else:
+            agg_st = None
+
+        x = x.sort_values(
+            by=[c for c in ["_day", "Stock", "_sr", "_rr", "_pdt"] if c in x.columns],
+            ascending=[True, True, False, False, False],
+        )
+        x = x.drop_duplicates(subset=["Stock", "_day"], keep="first")
+        x = x.merge(agg_src.reset_index(), on=["Stock", "_day"], how="left")
+        if agg_st is not None:
+            x = x.merge(agg_st.reset_index(), on=["Stock", "_day"], how="left")
+            x["Strategy"] = x.apply(
+                lambda r: r["_all_strategies"] if r.get("_all_strategies") else r.get("Strategy", ""),
+                axis=1,
+            )
+        x["Call Source"] = x.apply(
+            lambda r: r["_all_sources"] if r.get("_all_sources") else r.get("Call Source", ""),
+            axis=1,
+        )
+        drop_extra = ["_all_sources", "_all_strategies"]
+    else:
+        x = x.sort_values(
+            by=[c for c in ["_day", "Stock", "_src", "_rr", "_pdt"] if c in x.columns],
+            ascending=[True, True, True, False, False],
+        )
+        x = x.drop_duplicates(subset=["Stock", "_day", "_src"], keep="first")
+        drop_extra = []
+
+    drop_cols = [c for c in ["_pdt", "_day", "_src", "_rr", "_sr"] + drop_extra if c in x.columns]
+    return x.drop(columns=drop_cols).reset_index(drop=True)
 
 
 def show_history():
@@ -13071,6 +13190,14 @@ def show_history():
         buy_view = buy_view[
             ~res_u0.str.contains("TARGET ACHIEVED|STOP LOSS HIT|HOLDING PERIOD", na=False, regex=True)
         ]
+
+    # One stock name per calendar day (CRESTO STRATEGY + SURE same day → 1 row)
+    if not buy_view.empty:
+        _before = len(buy_view)
+        buy_view = dedupe_history_same_day(buy_view, one_stock_per_day=True)
+        _after = len(buy_view)
+        if _before > _after:
+            st.caption(f"Unique stocks today/period: removed **{_before - _after}** same-day duplicates.")
 
     # BUY-only stats for this filtered sheet
     if not buy_view.empty:
@@ -14754,10 +14881,79 @@ if st.session_state.results.empty and RESULT_FILE.exists():
 # SIDEBAR
 # ============================================================
 
+# Page list for sidebar navigation (label shown → internal page key)
+NAV_MENU = [
+    ("Dashboard", "🏠 Dashboard"),
+    ("Nifty Analysis", "📈 NIFTY 50 Chart + Analysis"),
+    ("BankNifty Analysis", "🏦 BANK NIFTY Chart + Analysis"),
+    ("BUY Calls", "🟢 BUY Calls"),
+    ("SELL Calls", "🔴 SELL Calls"),
+    ("Sure Calls", "✅ Sure Call Desk"),
+    ("Strategy Lab", "🧪 Strategy Lab + Backtest"),
+    ("Find Stock", "🔍 Find Stock"),
+    ("Sector Analysis", "🏭 Sector Analysis"),
+    ("Holding Advisor", "📥 My Holding Advisor"),
+    ("Portfolio", "💼 My Portfolio"),
+    ("History", "🕐 Past Predictions"),
+    ("Trade Tracker", "🤖 Auto Trade Tracker"),
+    ("Paper Trading", "🧪 Dummy / Paper Backtest"),
+    ("Stock Analysis", "🔍 Analyze Stock"),
+]
+NAV_KEYS = [k for k, _ in NAV_MENU]
+NAV_LABELS = [lab for _, lab in NAV_MENU]
+NAV_LABEL_TO_KEY = {lab: k for k, lab in NAV_MENU}
+
+
+def navigate_to(page_key: str):
+    """Immediate page change + close mobile sidebar on next paint."""
+    if st.session_state.get("page") != page_key:
+        st.session_state.page = page_key
+        st.session_state["_collapse_sidebar"] = True
+        st.rerun()
+
+
+def inject_mobile_sidebar_close():
+    """After nav, collapse sidebar on phone so content is visible immediately."""
+    if not st.session_state.get("_collapse_sidebar"):
+        return
+    st.session_state["_collapse_sidebar"] = False
+    components.html(
+        """
+        <script>
+        (function () {
+          try {
+            const doc = window.parent.document;
+            const w = window.parent.innerWidth || 0;
+            if (w > 900) return;
+            // Try common Streamlit collapse controls
+            const candidates = [
+              doc.querySelector('[data-testid="stSidebarCollapsedControl"]'),
+              doc.querySelector('button[kind="header"]'),
+              doc.querySelector('[data-testid="collapsedControl"]'),
+            ];
+            for (const el of candidates) {
+              if (el) { el.click(); return; }
+            }
+            // Fallback: click chevron inside sidebar header
+            const side = doc.querySelector('section[data-testid="stSidebar"]');
+            if (side) {
+              const btn = side.querySelector('button');
+              if (btn) btn.click();
+            }
+          } catch (e) {}
+        })();
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
 with st.sidebar:
 
     st.header("📈 NSE V12")
     st.caption(market_status_text())
+    st.caption("📱 Select a page below → opens at once. Menu: **☰**")
     n_res = 0
     try:
         n_res = len(st.session_state.results) if st.session_state.results is not None else 0
@@ -14772,68 +14968,26 @@ with st.sidebar:
         st.caption("Run **Full Market Scan** once; then switch tabs freely.")
     st.divider()
 
-    if st.button("🏠 Dashboard", use_container_width=True):
-        st.session_state.page = "Dashboard"
-        st.rerun()
+    # ---- Direct page selector (works best on mobile) ----
+    cur = st.session_state.get("page", "Dashboard")
+    try:
+        cur_idx = NAV_KEYS.index(cur)
+    except ValueError:
+        cur_idx = 0
+    picked = st.selectbox(
+        "📍 Go to page",
+        NAV_LABELS,
+        index=cur_idx,
+        key="nav_page_select",
+        help="Change selection to open that page immediately",
+    )
+    navigate_to(NAV_LABEL_TO_KEY.get(picked, "Dashboard"))
 
-    st.markdown("**📊 Indices**")
-    if st.button("📈 NIFTY 50 Chart + Analysis", use_container_width=True):
-        st.session_state.page = "Nifty Analysis"
-        st.rerun()
-
-    if st.button("🏦 BANK NIFTY Chart + Analysis", use_container_width=True):
-        st.session_state.page = "BankNifty Analysis"
-        st.rerun()
-
-    st.markdown("**📞 Calls**")
-    if st.button("🟢 BUY Calls", use_container_width=True):
-        st.session_state.page = "BUY Calls"
-        st.rerun()
-
-    if st.button("🔴 SELL Calls", use_container_width=True):
-        st.session_state.page = "SELL Calls"
-        st.rerun()
-
-    if st.button("✅ Sure Call Desk", use_container_width=True):
-        st.session_state.page = "Sure Calls"
-        st.rerun()
-
-    if st.button("🧪 Strategy Lab + Backtest", use_container_width=True):
-        st.session_state.page = "Strategy Lab"
-        st.rerun()
-
-    st.markdown("**🔎 Tools**")
-    if st.button("🔍 Find Stock", use_container_width=True):
-        st.session_state.page = "Find Stock"
-        st.rerun()
-
-    if st.button("🏭 Sector Analysis", use_container_width=True):
-        st.session_state.page = "Sector Analysis"
-        st.rerun()
-
-    if st.button("📥 My Holding Advisor", use_container_width=True):
-        st.session_state.page = "Holding Advisor"
-        st.rerun()
-
-    if st.button("💼 My Portfolio", use_container_width=True):
-        st.session_state.page = "Portfolio"
-        st.rerun()
-
-    if st.button("🕐 Past Predictions", use_container_width=True):
-        st.session_state.page = "History"
-        st.rerun()
-
-    if st.button("🤖 Auto Trade Tracker", use_container_width=True):
-        st.session_state.page = "Trade Tracker"
-        st.rerun()
-
-    if st.button("🧪 Dummy / Paper Backtest", use_container_width=True):
-        st.session_state.page = "Paper Trading"
-        st.rerun()
-
-    if st.button("🔍 Analyze Stock", use_container_width=True):
-        st.session_state.page = "Stock Analysis"
-        st.rerun()
+    st.markdown("**Quick taps**")
+    # Compact buttons still available — each jumps immediately
+    for key, label in NAV_MENU:
+        if st.button(label, key=f"nav_btn_{key}", use_container_width=True):
+            navigate_to(key)
 
     st.divider()
 
@@ -14899,6 +15053,9 @@ with st.sidebar:
         "All analysis works when market is closed (last close data)."
     )
 
+
+# Close mobile sidebar after navigation so the new page is visible
+inject_mobile_sidebar_close()
 
 # ============================================================
 # FULL MARKET SCAN
