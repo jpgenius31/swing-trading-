@@ -46,6 +46,9 @@ PAPER_FILE = APP_DIR / "paper_portfolio.csv"
 LEARNING_FILE = APP_DIR / "model_learning.json"
 STRATEGY_BT_FILE = APP_DIR / "strategy_backtest_results.csv"
 STRATEGY_LIVE_FILE = APP_DIR / "strategy_live_signals.csv"
+STRATEGY_PREV_FILE = APP_DIR / "strategy_live_signals_prev.csv"
+STRATEGY_META_FILE = APP_DIR / "strategy_live_meta.json"
+SYNC_VERSION_FILE = APP_DIR / "realtime_sync_version.json"
 MY_STRATEGY_PARAMS_FILE = APP_DIR / "my_strategy_params.json"
 NSE_UNIVERSE_CACHE = APP_DIR / "nse_equity_universe.csv"
 
@@ -81,12 +84,33 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Base */
+    /* Base — clean product UI */
     .block-container {
         padding-top: 1rem;
         padding-bottom: 2.5rem;
         padding-left: 1.5rem;
         padding-right: 1.5rem;
+    }
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0b1220 0%, #111827 100%);
+    }
+    [data-testid="stSidebar"] .stButton > button {
+        border-radius: 10px;
+        border: 1px solid #1e293b;
+        background: #0f172a;
+        color: #e2e8f0;
+        font-weight: 600;
+    }
+    [data-testid="stSidebar"] .stButton > button:hover {
+        border-color: #38bdf8;
+        color: #f0f9ff;
+    }
+    h1, h2, h3 {
+        letter-spacing: -0.02em;
+        font-weight: 700 !important;
+    }
+    div[data-testid="stMetricValue"] {
+        font-weight: 700;
     }
     .stock-card {
         border: 1px solid #dddddd;
@@ -3898,9 +3922,10 @@ My Strategy is **price vs RSI divergence** — it also applies to **index future
                     live_df["All matching strategies"] = names_list
                 st.session_state["live_strat_df"] = live_df
                 n_saved = 0
+                snap = {"n": 0, "n_new": 0, "new_stocks": []}
                 try:
                     if live_df is not None and not live_df.empty:
-                        live_df.to_csv(STRATEGY_LIVE_FILE, index=False)
+                        snap = save_strategy_snapshot(live_df)
                         special = []
                         for _, lr in live_df.iterrows():
                             special.append({
@@ -3918,15 +3943,36 @@ My Strategy is **price vs RSI divergence** — it also applies to **index future
                         n_saved = save_special_calls(special)
                 except Exception as e:
                     st.warning(f"Could not save strategy calls to history: {e}")
+                if snap.get("n"):
+                    st.success(
+                        f"Shared on all devices: **{snap['n']}** strategy stocks · "
+                        f"**{snap.get('n_new', 0)}** new this update"
+                    )
+                    if snap.get("new_stocks"):
+                        st.info("New only: " + ", ".join(snap["new_stocks"][:20]))
                 if n_saved:
                     st.success(
-                        f"Saved **{n_saved}** strategy signal(s) to Past Predictions "
-                        f"(Call Source = **STRATEGY**)."
+                        f"Saved **{n_saved}** to Past Predictions (STRATEGY) — visible on every device after reload."
                     )
                 elif live_df is not None and not live_df.empty:
-                    st.info("Live signals ready (already in history today, or none new).")
-        live_df = st.session_state.get("live_strat_df", pd.DataFrame())
+                    st.info("Signals ready (already in history today, or none new).")
+        # Always try load shared list (phone → PC)
+        if st.button("📥 Load strategy list from server", key="load_strat_shared"):
+            loaded = load_strategy_snapshot(force=True)
+            if loaded is not None and not loaded.empty:
+                st.success(f"Loaded **{len(loaded)}** strategy stocks from server.")
+                st.rerun()
+            else:
+                st.warning("No shared strategy file yet — generate live signals once.")
+        live_df = load_strategy_snapshot(force=False)
+        if live_df is None or (isinstance(live_df, pd.DataFrame) and live_df.empty):
+            live_df = st.session_state.get("live_strat_df", pd.DataFrame())
         if live_df is not None and not live_df.empty:
+            only_new = st.checkbox("Show only newly added stocks", value=False, key="strat_only_new")
+            view_live = strategy_new_only(live_df) if only_new else live_df
+            if only_new:
+                st.caption(f"**{len(view_live)}** new stocks since last shared update (of {len(live_df)} total).")
+                live_df = view_live if not view_live.empty else live_df
             if st.button("💾 Save these strategy signals to Past Predictions", key="strat_resave"):
                 special = []
                 for _, lr in live_df.iterrows():
@@ -7635,6 +7681,7 @@ def load_paper_portfolio() -> pd.DataFrame:
 def save_paper_portfolio(df: pd.DataFrame):
     try:
         df.to_csv(PAPER_FILE, index=False)
+        bump_sync_version("paper_trade")
     except Exception:
         pass
 
@@ -7929,29 +7976,106 @@ def backtest_paper_trade(row) -> dict:
 
 def show_paper_trading():
     """Dummy trades at current price → paper portfolio + backtest."""
-    st.title("🧪 Dummy / Paper Trades & Backtest")
-    st.caption(
-        "Orders from **any page** (Strategy / BUY / SELL / Find Stock cards) land here. "
-        "Target & Stop Loss are set automatically from the call (or ATR). "
-        "Stored in `paper_portfolio.csv`."
+    st.markdown(
+        """
+        <div style="border-radius:16px;padding:18px 20px;margin-bottom:14px;
+                    background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);
+                    border:1px solid #334155;">
+          <div style="font-size:1.5rem;font-weight:700;color:#f8fafc;">Paper Trading Desk</div>
+          <div style="color:#94a3b8;margin-top:4px;">Simulated orders · target & stop tracked · same book on every device after save</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     paper = load_paper_portfolio()
-    if paper is not None and not paper.empty:
-        open_n = int((paper.get("Status", pd.Series(["OPEN"] * len(paper))).astype(str).str.upper() == "OPEN").sum()) if "Status" in paper.columns else len(paper)
-        st.success(f"Portfolio: **{len(paper)}** trades · **{open_n}** open")
-        st.markdown("##### Recent paper orders")
-        filterable_dataframe(
-            paper.sort_values("Open Date", ascending=False) if "Open Date" in paper.columns else paper,
-            key="paper_book_table",
-            default_cols=[c for c in [
-                "Open Date", "Stock", "Side", "Entry", "Target", "Stop Loss",
-                "Shares", "Source", "Status", "Result", "Return %", "PnL ₹",
-            ] if c in paper.columns],
-            height=280,
+    if paper is None:
+        paper = pd.DataFrame()
+    if not paper.empty:
+        p = paper.copy()
+        p["Entry"] = pd.to_numeric(p.get("Entry"), errors="coerce").fillna(0)
+        p["Shares"] = pd.to_numeric(p.get("Shares"), errors="coerce").fillna(0)
+        p["Return %"] = pd.to_numeric(p.get("Return %"), errors="coerce")
+        p["PnL ₹"] = pd.to_numeric(p.get("PnL ₹"), errors="coerce")
+        p["Invested ₹"] = p["Entry"] * p["Shares"]
+        status_u = p["Status"].astype(str).str.upper() if "Status" in p.columns else pd.Series(["OPEN"] * len(p))
+        res_u = p["Result"].astype(str).str.upper() if "Result" in p.columns else pd.Series([""] * len(p))
+        open_n = int((status_u == "OPEN").sum())
+        tgt_n = int(res_u.str.contains("TARGET", na=False).sum())
+        sl_n = int(res_u.str.contains("STOP", na=False).sum())
+        invested = float(p["Invested ₹"].sum())
+        pnl_total = float(p["PnL ₹"].fillna(0).sum())
+        ret_closed = p.loc[res_u.str.contains("TARGET|STOP|HOLDING", na=False), "Return %"]
+        avg_ret = float(ret_closed.mean()) if len(ret_closed.dropna()) else 0.0
+        overall_ret = (pnl_total / invested * 100.0) if invested > 0 else 0.0
+
+        st.markdown(
+            f"""
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:12px;">
+              <div style="background:#020617;border-radius:12px;padding:12px;border:1px solid #1e293b;">
+                <div style="color:#94a3b8;font-size:0.75rem;">INVESTED</div>
+                <div style="color:#f8fafc;font-size:1.25rem;font-weight:700;">₹{invested:,.0f}</div>
+              </div>
+              <div style="background:#020617;border-radius:12px;padding:12px;border:1px solid #1e293b;">
+                <div style="color:#94a3b8;font-size:0.75rem;">TOTAL P&L</div>
+                <div style="color:{'#4ade80' if pnl_total>=0 else '#f87171'};font-size:1.25rem;font-weight:700;">₹{pnl_total:+,.0f}</div>
+              </div>
+              <div style="background:#020617;border-radius:12px;padding:12px;border:1px solid #1e293b;">
+                <div style="color:#94a3b8;font-size:0.75rem;">OVERALL RETURN</div>
+                <div style="color:{'#4ade80' if overall_ret>=0 else '#f87171'};font-size:1.25rem;font-weight:700;">{overall_ret:+.2f}%</div>
+              </div>
+              <div style="background:#020617;border-radius:12px;padding:12px;border:1px solid #1e293b;">
+                <div style="color:#94a3b8;font-size:0.75rem;">🎯 TARGET / 🔴 STOP</div>
+                <div style="color:#f8fafc;font-size:1.25rem;font-weight:700;">{tgt_n} / {sl_n}</div>
+              </div>
+              <div style="background:#020617;border-radius:12px;padding:12px;border:1px solid #1e293b;">
+                <div style="color:#94a3b8;font-size:0.75rem;">OPEN · AVG RET%</div>
+                <div style="color:#f8fafc;font-size:1.25rem;font-weight:700;">{open_n} · {avg_ret:+.1f}%</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-    st.subheader("➕ New dummy trade")
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            pf_res = st.selectbox(
+                "Result filter",
+                ["ALL", "TARGET ACHIEVED", "STOP LOSS HIT", "OPEN / PENDING", "HOLDING PERIOD"],
+                key="paper_res_filter",
+            )
+        with f2:
+            pf_side = st.selectbox("Side", ["ALL", "BUY", "SELL"], key="paper_side_filter")
+        with f3:
+            pf_n = st.selectbox("Rows", [25, 50, 100, 200, "ALL"], index=1, key="paper_rows")
+
+        view = p.copy()
+        if pf_side != "ALL" and "Side" in view.columns:
+            view = view[view["Side"].astype(str).str.upper() == pf_side]
+        ru = view["Result"].astype(str).str.upper() if "Result" in view.columns else pd.Series([""] * len(view))
+        su = view["Status"].astype(str).str.upper() if "Status" in view.columns else pd.Series(["OPEN"] * len(view))
+        if pf_res == "TARGET ACHIEVED":
+            view = view[ru.str.contains("TARGET", na=False)]
+        elif pf_res == "STOP LOSS HIT":
+            view = view[ru.str.contains("STOP", na=False)]
+        elif pf_res == "HOLDING PERIOD":
+            view = view[ru.str.contains("HOLDING", na=False)]
+        elif pf_res == "OPEN / PENDING":
+            view = view[(su == "OPEN") | ru.str.contains("PENDING", na=False) | (ru == "") | (ru == "NAN")]
+
+        if "Open Date" in view.columns:
+            view = view.sort_values("Open Date", ascending=False)
+        if pf_n != "ALL":
+            view = view.head(int(pf_n))
+
+        show_cols = [c for c in [
+            "Open Date", "Stock", "Side", "Shares", "Entry", "Invested ₹",
+            "Target", "Stop Loss", "Status", "Result", "Return %", "PnL ₹", "Source",
+        ] if c in view.columns]
+        st.markdown("##### Portfolio book")
+        filterable_dataframe(view, key="paper_book_table", default_cols=show_cols, height=320)
+
+    st.subheader("➕ New paper trade")
     c1, c2, c3 = st.columns(3)
     with c1:
         stock = st.text_input("NSE Symbol", value="", key="paper_sym").upper().strip()
@@ -12613,10 +12737,12 @@ def save_special_calls(rows_list):
         # Force Call Source on new rows if normalize blanked anything
         HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
         out.to_csv(HISTORY_FILE, index=False)
+        bump_sync_version("past_predictions")
         return len(new_rows)
     except Exception:
         try:
             out.to_csv(HISTORY_FILE, index=False)
+            bump_sync_version("past_predictions")
             return len(new_rows)
         except Exception:
             return 0
@@ -14970,6 +15096,146 @@ for key, value in defaults.items():
 SCAN_META_FILE = APP_DIR / "latest_results_meta.json"
 
 
+def bump_sync_version(reason: str = "") -> int:
+    """
+    Global version counter for cross-device near-real-time sync.
+    Any device that sees a higher version reloads shared files.
+    (Streamlit Cloud cannot host a custom WebSocket server; version+poll is the reliable pattern.)
+    """
+    ver = 1
+    try:
+        if SYNC_VERSION_FILE.exists():
+            data = json.loads(SYNC_VERSION_FILE.read_text(encoding="utf-8"))
+            ver = int(data.get("version", 0)) + 1
+        payload = {
+            "version": ver,
+            "reason": reason or "update",
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "at_ist": india_now().strftime("%Y-%m-%d %H:%M:%S IST"),
+        }
+        SYNC_VERSION_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return ver
+
+
+def read_sync_version() -> dict:
+    try:
+        if SYNC_VERSION_FILE.exists():
+            return json.loads(SYNC_VERSION_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {"version": 0, "reason": "", "at_ist": ""}
+
+
+def apply_realtime_sync(force: bool = False) -> bool:
+    """
+    If server sync version is newer than this session, reload scan / strategy / paper.
+    Returns True if data was refreshed.
+    """
+    remote = read_sync_version()
+    remote_v = int(remote.get("version") or 0)
+    local_v = int(st.session_state.get("_sync_version_seen", 0) or 0)
+    if not force and remote_v <= local_v:
+        return False
+    changed = False
+    try:
+        n = load_scan_from_disk(force=True)
+        if n:
+            changed = True
+    except Exception:
+        pass
+    try:
+        df = load_strategy_snapshot(force=True)
+        if df is not None and not getattr(df, "empty", True):
+            changed = True
+    except Exception:
+        pass
+    try:
+        # Paper / history are read from disk on each page; bump session marker only
+        if PAPER_FILE.exists() or HISTORY_FILE.exists():
+            changed = True
+    except Exception:
+        pass
+    st.session_state["_sync_version_seen"] = remote_v
+    st.session_state["_sync_last_reason"] = remote.get("reason", "")
+    st.session_state["_sync_last_at"] = remote.get("at_ist", "")
+    return changed or force
+
+
+def save_strategy_snapshot(live_df: pd.DataFrame) -> dict:
+    """
+    Save strategy list for all devices. Compare to previous file → new stocks only.
+    Returns {n, n_new, new_stocks, saved_at_ist}.
+    """
+    out = {"n": 0, "n_new": 0, "new_stocks": [], "saved_at_ist": ""}
+    if live_df is None or live_df.empty:
+        return out
+    df = live_df.copy()
+    if "Stock" in df.columns:
+        df["Stock"] = df["Stock"].astype(str).str.upper().str.replace(".NS", "", regex=False).str.strip()
+    prev_stocks = set()
+    try:
+        if STRATEGY_LIVE_FILE.exists():
+            # current becomes previous
+            try:
+                old = pd.read_csv(STRATEGY_LIVE_FILE)
+                if not old.empty and "Stock" in old.columns:
+                    prev_stocks = set(
+                        old["Stock"].astype(str).str.upper().str.replace(".NS", "", regex=False).str.strip()
+                    )
+                    old.to_csv(STRATEGY_PREV_FILE, index=False)
+            except Exception:
+                pass
+        df.to_csv(STRATEGY_LIVE_FILE, index=False)
+        now_stocks = set(df["Stock"].astype(str).tolist()) if "Stock" in df.columns else set()
+        new_stocks = sorted(now_stocks - prev_stocks)
+        out["n"] = len(df)
+        out["n_new"] = len(new_stocks)
+        out["new_stocks"] = new_stocks
+        out["saved_at_ist"] = india_now().strftime("%Y-%m-%d %H:%M:%S IST")
+        STRATEGY_META_FILE.write_text(json.dumps(out, indent=2), encoding="utf-8")
+        bump_sync_version("strategy_list")
+    except Exception:
+        pass
+    return out
+
+
+def load_strategy_snapshot(force: bool = True) -> pd.DataFrame:
+    """Load shared strategy list from disk (all devices on same Cloud app)."""
+    try:
+        if STRATEGY_LIVE_FILE.exists():
+            df = pd.read_csv(STRATEGY_LIVE_FILE)
+            if df is not None and not df.empty:
+                if force or st.session_state.get("live_strat_df") is None:
+                    st.session_state["live_strat_df"] = df
+                return df
+    except Exception:
+        pass
+    return st.session_state.get("live_strat_df", pd.DataFrame())
+
+
+def strategy_new_only(live_df: pd.DataFrame) -> pd.DataFrame:
+    """Rows whose stock was not in the previous shared strategy file."""
+    if live_df is None or live_df.empty:
+        return pd.DataFrame()
+    prev = set()
+    try:
+        if STRATEGY_PREV_FILE.exists():
+            old = pd.read_csv(STRATEGY_PREV_FILE)
+            if not old.empty and "Stock" in old.columns:
+                prev = set(
+                    old["Stock"].astype(str).str.upper().str.replace(".NS", "", regex=False).str.strip()
+                )
+    except Exception:
+        pass
+    x = live_df.copy()
+    x["_s"] = x["Stock"].astype(str).str.upper().str.replace(".NS", "", regex=False).str.strip()
+    if not prev:
+        return x.drop(columns=["_s"], errors="ignore")
+    return x[~x["_s"].isin(prev)].drop(columns=["_s"], errors="ignore")
+
+
 def save_scan_to_disk(results: pd.DataFrame) -> int:
     """Persist scan so other browser sessions on the same app can load it."""
     if results is None or results.empty:
@@ -14990,6 +15256,7 @@ def save_scan_to_disk(results: pd.DataFrame) -> int:
             "saved_at_ist": india_now().strftime("%Y-%m-%d %H:%M:%S IST"),
         }
         SCAN_META_FILE.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        bump_sync_version("full_market_scan")
         return int(len(out))
     except Exception:
         return 0
@@ -15034,6 +15301,10 @@ def load_scan_from_disk(force: bool = False) -> int:
 # Always try to pick up a newer/shared scan from disk at session start
 try:
     load_scan_from_disk(force=False)
+except Exception:
+    pass
+try:
+    load_strategy_snapshot(force=False)
 except Exception:
     pass
 
@@ -15252,12 +15523,37 @@ with st.sidebar:
     )
     st.session_state.auto_refresh = auto_refresh
 
+    live_sync = st.checkbox(
+        "🔴 Live sync (all devices)",
+        value=bool(st.session_state.get("live_sync", False)),
+        help="Near real-time: polls shared server version. When phone saves strategy/scan/paper, PC picks it up. "
+             "True WebSockets need an external server — Streamlit Cloud uses version+poll instead.",
+    )
+    st.session_state.live_sync = live_sync
+    if live_sync:
+        sync_every = st.select_slider(
+            "Sync every (sec)",
+            options=[3, 5, 8, 10, 15],
+            value=int(st.session_state.get("live_sync_secs", 5) or 5),
+            key="live_sync_secs_slider",
+        )
+        st.session_state.live_sync_secs = int(sync_every)
+        remote = read_sync_version()
+        st.caption(
+            f"Server v**{remote.get('version', 0)}** · {remote.get('reason', '—')} · "
+            f"{remote.get('at_ist', '')}"
+        )
+        if st.button("⚡ Sync now", use_container_width=True, key="sync_now_btn"):
+            if apply_realtime_sync(force=True):
+                st.success("Synced from server.")
+            st.rerun()
+
     if st.button("🔄 Manual refresh now", use_container_width=True, type="primary"):
-        # Clear short caches so quotes/history refresh without full scan
         try:
             live_quote.clear()
         except Exception:
             pass
+        apply_realtime_sync(force=True)
         st.rerun()
 
     if st.button(
@@ -15275,9 +15571,8 @@ with st.sidebar:
             st.rerun()
 
     st.caption(
-        "Tip: keep Auto refresh OFF while browsing tabs. "
-        "Use Manual refresh or 5s auto only when you need live prices. "
-        "All analysis works when market is closed (last close data)."
+        "Live sync = cross-device strategy / scan / paper / history. "
+        "Keep OFF while heavy scanning; ON when using phone + PC together."
     )
 
 
@@ -15925,10 +16220,32 @@ elif st.session_state.page == "Stock Analysis":
 
 
 # ============================================================
-# AUTO REFRESH (optional — OFF by default for speed)
+# LIVE SYNC + AUTO REFRESH
 # ============================================================
 
-if st.session_state.get("auto_refresh", False):
+# Near real-time multi-device sync (version file on server)
+if st.session_state.get("live_sync", False):
+    _sync_secs = int(st.session_state.get("live_sync_secs", 5) or 5)
+    try:
+        remote = read_sync_version()
+        remote_v = int(remote.get("version") or 0)
+        local_v = int(st.session_state.get("_sync_version_seen", 0) or 0)
+        if remote_v > local_v:
+            apply_realtime_sync(force=True)
+            st.session_state["_sync_version_seen"] = remote_v
+    except Exception:
+        pass
+    st.markdown(
+        f"""
+        <script>
+        setTimeout(function() {{
+            window.parent.location.reload();
+        }}, {_sync_secs * 1000});
+        </script>
+        """,
+        unsafe_allow_html=True,
+    )
+elif st.session_state.get("auto_refresh", False):
     _secs = int(st.session_state.get("refresh_seconds", LIVE_REFRESH_SECONDS) or 5)
     st.markdown(
         f"""
