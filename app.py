@@ -7390,6 +7390,13 @@ def evaluate_history(force_all: bool = False):
     except Exception:
         pass
 
+    # Align Paper book with history TARGET / STOP outcomes
+    try:
+        sync_outcomes_across_books(force_paper=True)
+        history = normalize_history_df(load_history())
+    except Exception:
+        pass
+
     return history
 
 
@@ -7684,6 +7691,227 @@ def save_paper_portfolio(df: pd.DataFrame):
         bump_sync_version("paper_trade")
     except Exception:
         pass
+
+
+def _norm_stock_key(s) -> str:
+    return str(s or "").upper().replace(".NS", "").strip()
+
+
+def _outcome_label(result) -> str:
+    u = str(result or "").upper()
+    if "TARGET" in u or u == "WIN":
+        return "TARGET ACHIEVED"
+    if "STOP" in u or u == "LOSS":
+        return "STOP LOSS HIT"
+    if "HOLDING" in u:
+        return "HOLDING PERIOD COMPLETED"
+    if "PENDING" in u or u in ("", "NAN", "NONE"):
+        return "PENDING"
+    return str(result or "PENDING")
+
+
+def _rows_match_trade(stock, entry, side, open_dt, other_stock, other_entry, other_side, other_dt, entry_tol=0.03) -> bool:
+    """Same underlying trade across history vs paper books."""
+    if _norm_stock_key(stock) != _norm_stock_key(other_stock):
+        return False
+    s1 = str(side or "BUY").upper()
+    s2 = str(other_side or "BUY").upper()
+    if "SELL" in s1:
+        s1 = "SELL"
+    else:
+        s1 = "BUY"
+    if "SELL" in s2:
+        s2 = "SELL"
+    else:
+        s2 = "BUY"
+    if s1 != s2:
+        return False
+    e1, e2 = safe_float(entry), safe_float(other_entry)
+    if e1 > 0 and e2 > 0:
+        if abs(e1 - e2) / max(e1, e2) > entry_tol:
+            return False
+    try:
+        d1 = pd.Timestamp(pd.to_datetime(open_dt, errors="coerce")).normalize()
+        d2 = pd.Timestamp(pd.to_datetime(other_dt, errors="coerce")).normalize()
+        if pd.notna(d1) and pd.notna(d2) and abs((d1 - d2).days) > 3:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def evaluate_all_paper_trades(force_closed: bool = False) -> pd.DataFrame:
+    """Run OHLC target/stop check on every paper row (same rules as past predictions)."""
+    paper = load_paper_portfolio()
+    if paper is None or paper.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in paper.iterrows():
+        rec = r.to_dict()
+        status = str(rec.get("Status", "")).upper()
+        result = _outcome_label(rec.get("Result"))
+        if status == "CLOSED" and result in ("TARGET ACHIEVED", "STOP LOSS HIT", "HOLDING PERIOD COMPLETED") and not force_closed:
+            rows.append(rec)
+            continue
+        try:
+            res = backtest_paper_trade(rec)
+            rec.update(res)
+            # Normalize labels
+            rec["Result"] = _outcome_label(rec.get("Result"))
+            if rec["Result"] in ("TARGET ACHIEVED", "STOP LOSS HIT", "HOLDING PERIOD COMPLETED"):
+                rec["Status"] = "CLOSED"
+        except Exception:
+            pass
+        rows.append(rec)
+    out = pd.DataFrame(rows)
+    save_paper_portfolio(out)
+    return out
+
+
+def sync_outcomes_across_books(force_paper: bool = True) -> dict:
+    """
+    One source of truth for TARGET ACHIEVED / STOP LOSS HIT:
+    - Re-check open paper trades on OHLC
+    - Re-check history (caller may run evaluate_history first)
+    - Copy closed outcomes both ways when stock+side+entry match
+    So Strategy buy → paper and Past Predictions stay aligned.
+    """
+    stats = {"paper_updated": 0, "history_updated": 0, "linked": 0}
+    try:
+        if force_paper:
+            evaluate_all_paper_trades(force_closed=False)
+    except Exception:
+        pass
+
+    paper = load_paper_portfolio()
+    history = normalize_history_df(load_history())
+    if history is None:
+        history = pd.DataFrame()
+    if paper is None:
+        paper = pd.DataFrame()
+
+    if paper.empty and history.empty:
+        return stats
+
+    # --- Paper → History (closed paper updates matching open history) ---
+    if not paper.empty and not history.empty:
+        for pi, prow in paper.iterrows():
+            pres = _outcome_label(prow.get("Result"))
+            if pres not in ("TARGET ACHIEVED", "STOP LOSS HIT", "HOLDING PERIOD COMPLETED"):
+                continue
+            for hi in history.index:
+                hrow = history.loc[hi]
+                hres = _outcome_label(hrow.get("Result"))
+                if hres in ("TARGET ACHIEVED", "STOP LOSS HIT", "HOLDING PERIOD COMPLETED"):
+                    # already closed — still align if labels differ
+                    if not _rows_match_trade(
+                        prow.get("Stock"), prow.get("Entry"), prow.get("Side"), prow.get("Open Date"),
+                        hrow.get("Stock"), hrow.get("Entry"), hrow.get("Call"), hrow.get("Prediction Date"),
+                    ):
+                        continue
+                elif not _rows_match_trade(
+                    prow.get("Stock"), prow.get("Entry"), prow.get("Side"), prow.get("Open Date"),
+                    hrow.get("Stock"), hrow.get("Entry"), hrow.get("Call"), hrow.get("Prediction Date"),
+                ):
+                    continue
+                else:
+                    # open history ← closed paper
+                    pass
+
+                if not _rows_match_trade(
+                    prow.get("Stock"), prow.get("Entry"), prow.get("Side"), prow.get("Open Date"),
+                    hrow.get("Stock"), hrow.get("Entry"), hrow.get("Call"), hrow.get("Prediction Date"),
+                ):
+                    continue
+
+                # Apply paper outcome onto history (keep locked target/stop)
+                history.at[hi, "Result"] = pres
+                history.at[hi, "Status"] = "CLOSED"
+                exit_px = prow.get("Exit Price")
+                if exit_px not in ("", None) and str(exit_px).lower() != "nan":
+                    history.at[hi, "Exit Price"] = safe_float(exit_px)
+                ret = safe_float(prow.get("Return %"), None)
+                if ret is not None:
+                    history.at[hi, "Return %"] = ret
+                exit_d = str(prow.get("Exit Date") or "")
+                if exit_d:
+                    history.at[hi, "Evaluation Date"] = exit_d
+                    if pres == "TARGET ACHIEVED":
+                        history.at[hi, "Result Detail"] = (
+                            f"🎯 TARGET ACHIEVED\nTarget Reached On: {exit_d}\n"
+                            f"Profit: {safe_float(prow.get('Return %')):+.2f}%\n"
+                            f"(Synced from Paper trade)"
+                        )
+                        history.at[hi, "Recommendation"] = "🎯 TARGET ACHIEVED — Book profit"
+                    elif pres == "STOP LOSS HIT":
+                        history.at[hi, "Result Detail"] = (
+                            f"🔴 STOP LOSS HIT\nStop Loss Hit On: {exit_d}\n"
+                            f"Loss: {safe_float(prow.get('Return %')):+.2f}%\n"
+                            f"(Synced from Paper trade)"
+                        )
+                        history.at[hi, "Recommendation"] = "🔴 STOP LOSS HIT — Exit"
+                stats["history_updated"] += 1
+                stats["linked"] += 1
+
+        # --- History → Paper ---
+        for hi in history.index:
+            hrow = history.loc[hi]
+            hres = _outcome_label(hrow.get("Result"))
+            if hres not in ("TARGET ACHIEVED", "STOP LOSS HIT", "HOLDING PERIOD COMPLETED"):
+                continue
+            for pi in paper.index:
+                prow = paper.loc[pi]
+                if not _rows_match_trade(
+                    hrow.get("Stock"), hrow.get("Entry"), hrow.get("Call"), hrow.get("Prediction Date"),
+                    prow.get("Stock"), prow.get("Entry"), prow.get("Side"), prow.get("Open Date"),
+                ):
+                    continue
+                pres = _outcome_label(prow.get("Result"))
+                if pres == hres and str(prow.get("Status", "")).upper() == "CLOSED":
+                    continue
+                paper.at[pi, "Result"] = hres
+                paper.at[pi, "Status"] = "CLOSED"
+                exit_px = safe_float(hrow.get("Exit Price"))
+                entry = safe_float(prow.get("Entry")) or safe_float(hrow.get("Entry"))
+                shares = safe_int(prow.get("Shares"), 1) or 1
+                if exit_px <= 0:
+                    if hres == "TARGET ACHIEVED":
+                        exit_px = safe_float(hrow.get("Target"))
+                    elif hres == "STOP LOSS HIT":
+                        exit_px = safe_float(hrow.get("Stop Loss"))
+                paper.at[pi, "Exit Price"] = round(exit_px, 2) if exit_px else prow.get("Exit Price")
+                side = str(prow.get("Side", "BUY")).upper()
+                if entry > 0 and exit_px > 0:
+                    if "SELL" in side:
+                        ret = (entry - exit_px) / entry * 100
+                    else:
+                        ret = (exit_px - entry) / entry * 100
+                    paper.at[pi, "Return %"] = round(ret, 2)
+                    paper.at[pi, "PnL ₹"] = round(shares * entry * ret / 100, 2)
+                else:
+                    ret = safe_float(hrow.get("Return %"), None)
+                    if ret is not None:
+                        paper.at[pi, "Return %"] = ret
+                        paper.at[pi, "PnL ₹"] = round(shares * entry * ret / 100, 2) if entry else ""
+                eval_d = str(hrow.get("Evaluation Date") or "")
+                if eval_d:
+                    paper.at[pi, "Exit Date"] = eval_d[:10] if len(eval_d) >= 10 else eval_d
+                stats["paper_updated"] += 1
+                stats["linked"] += 1
+
+    try:
+        if not paper.empty:
+            save_paper_portfolio(paper)
+    except Exception:
+        pass
+    try:
+        if not history.empty:
+            history = normalize_history_df(history)
+            history.to_csv(HISTORY_FILE, index=False)
+            bump_sync_version("outcomes_synced")
+    except Exception:
+        pass
+    return stats
 
 
 def execute_paper_order(
@@ -8173,39 +8401,40 @@ def show_paper_trading():
     b1, b2, b3 = st.columns(3)
     with b1:
         if st.button("⟳ Backtest / update all", type="primary", key="paper_bt"):
-            paper = load_paper_portfolio()
-            if paper.empty:
-                st.info("No paper trades yet.")
-            else:
-                rows = []
-                with st.spinner("Backtesting against daily OHLC..."):
-                    for _, r in paper.iterrows():
-                        rec = r.to_dict()
-                        if str(rec.get("Status", "")).upper() == "CLOSED":
-                            rows.append(rec)
-                            continue
-                        res = backtest_paper_trade(rec)
-                        rec.update(res)
-                        rows.append(rec)
-                paper = pd.DataFrame(rows)
-                save_paper_portfolio(paper)
-                st.success("Backtest complete — results written to paper_portfolio.csv")
-                st.rerun()
+            with st.spinner("Backtesting paper + syncing Past Predictions..."):
+                evaluate_all_paper_trades(force_closed=False)
+                stats = sync_outcomes_across_books(force_paper=False)
+            st.success(
+                f"Backtest done · linked **{stats.get('linked', 0)}** outcomes to Past Predictions"
+            )
+            st.rerun()
     with b2:
+        if st.button("🔗 Sync with Past Predictions", key="paper_sync_hist"):
+            with st.spinner("Aligning target/stop across Paper + History..."):
+                try:
+                    evaluate_history(force_all=False)
+                except Exception:
+                    pass
+                stats = sync_outcomes_across_books(force_paper=True)
+            st.success(
+                f"Synced · paper updates {stats.get('paper_updated', 0)} · "
+                f"history updates {stats.get('history_updated', 0)}"
+            )
+            st.rerun()
+    with b3:
         if st.button("Clear closed trades", key="paper_clear_closed"):
             paper = load_paper_portfolio()
             if not paper.empty:
                 paper = paper[paper["Status"].astype(str).str.upper() != "CLOSED"]
                 save_paper_portfolio(paper)
             st.rerun()
-    with b3:
-        if st.button("Clear entire paper book", key="paper_clear_all"):
-            save_paper_portfolio(pd.DataFrame(columns=[
-                "Trade ID", "Open Date", "Stock", "Side", "Shares", "Entry", "Target",
-                "Stop Loss", "Hold Days", "Status", "Result", "Exit Date", "Exit Price",
-                "Return %", "PnL ₹", "Notes",
-            ]))
-            st.rerun()
+    if st.button("Clear entire paper book", key="paper_clear_all"):
+        save_paper_portfolio(pd.DataFrame(columns=[
+            "Trade ID", "Open Date", "Stock", "Side", "Shares", "Entry", "Target",
+            "Stop Loss", "Hold Days", "Status", "Result", "Exit Date", "Exit Price",
+            "Return %", "PnL ₹", "Notes",
+        ]))
+        st.rerun()
 
     paper = load_paper_portfolio()
     if paper.empty:
@@ -13131,10 +13360,11 @@ def show_history():
             pass
 
     if do_eval or force_eval:
-        with st.spinner("Updating prediction outcomes + learning from mistakes..."):
+        with st.spinner("Updating prediction outcomes + paper book + learning..."):
             try:
                 evaluate_history(force_all=bool(force_eval))
                 refresh_history_current_prices(max_stocks=40)
+                sync_outcomes_across_books(force_paper=True)
                 learn_from_history(min_closed=3)
             except Exception as e:
                 st.warning(f"Evaluation note: {e}")
