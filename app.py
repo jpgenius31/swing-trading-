@@ -14964,19 +14964,78 @@ for key, value in defaults.items():
 
 
 # ============================================================
-# LOAD SAVED RESULT
+# LOAD SAVED RESULT (shared scan across phone / PC on same Cloud app)
 # ============================================================
 
-# Load last full-market scan from disk so phone / other browser
-# does NOT need to re-scan (same app instance / shared latest_results.csv).
-if st.session_state.results.empty and RESULT_FILE.exists():
+SCAN_META_FILE = APP_DIR / "latest_results_meta.json"
+
+
+def save_scan_to_disk(results: pd.DataFrame) -> int:
+    """Persist scan so other browser sessions on the same app can load it."""
+    if results is None or results.empty:
+        return 0
+    out = results.drop(columns=["Data", "News"], errors="ignore").copy()
+    try:
+        out.to_csv(RESULT_FILE, index=False)
+        # Force flush for Cloud multi-session reads
+        try:
+            import os
+            with open(RESULT_FILE, "a", encoding="utf-8") as _:
+                os.fsync(_.fileno()) if False else None
+        except Exception:
+            pass
+        meta = {
+            "rows": int(len(out)),
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "saved_at_ist": india_now().strftime("%Y-%m-%d %H:%M:%S IST"),
+        }
+        SCAN_META_FILE.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        return int(len(out))
+    except Exception:
+        return 0
+
+
+def load_scan_from_disk(force: bool = False) -> int:
+    """
+    Load latest_results.csv into session.
+    force=True → always replace session with disk (use after phone scan on PC).
+    Returns number of rows loaded, or 0.
+    """
+    if not RESULT_FILE.exists():
+        return 0
     try:
         saved = pd.read_csv(RESULT_FILE)
-        if not saved.empty:
-            st.session_state.results = ensure_result_columns(saved)
+        if saved is None or saved.empty:
+            return 0
+        saved = ensure_result_columns(saved)
+        n_disk = len(saved)
+        n_mem = 0
+        try:
+            if st.session_state.results is not None and not st.session_state.results.empty:
+                n_mem = len(st.session_state.results)
+        except Exception:
+            n_mem = 0
+        if force or n_mem == 0 or n_disk > n_mem:
+            st.session_state.results = saved
             st.session_state["_scan_loaded_from_disk"] = True
+            try:
+                if SCAN_META_FILE.exists():
+                    st.session_state["_scan_meta"] = json.loads(
+                        SCAN_META_FILE.read_text(encoding="utf-8")
+                    )
+            except Exception:
+                st.session_state["_scan_meta"] = {"rows": n_disk}
+            return n_disk
     except Exception:
-        pass
+        return 0
+    return n_mem
+
+
+# Always try to pick up a newer/shared scan from disk at session start
+try:
+    load_scan_from_disk(force=False)
+except Exception:
+    pass
 
 
 # ============================================================
@@ -15091,9 +15150,32 @@ with st.sidebar:
         st.success(f"Scan ready: **{n_res}** stocks (no need to re-scan)")
         st.caption("Other tabs use this cache → faster switching.")
     elif RESULT_FILE.exists():
-        st.warning("Scan file found but empty — run Full Market Scan once.")
+        st.warning("Scan file on server — tap **Reload shared scan** below.")
     else:
         st.caption("Run **Full Market Scan** once; then switch tabs freely.")
+
+    if st.button(
+        "📥 Reload shared scan (phone → PC)",
+        use_container_width=True,
+        key="reload_shared_scan",
+        help="Load latest_results.csv saved by another device on this same Cloud app",
+    ):
+        n_load = load_scan_from_disk(force=True)
+        if n_load > 0:
+            st.success(f"Loaded **{n_load}** stocks from shared scan file.")
+            st.rerun()
+        else:
+            st.error(
+                "No shared scan file on server. "
+                "Scan may have failed on the phone, or Cloud reset the disk. "
+                "Run FULL MARKET SCAN again on this device."
+            )
+    meta = st.session_state.get("_scan_meta") or {}
+    if meta:
+        st.caption(
+            f"Server scan: **{meta.get('rows', '?')}** rows · "
+            f"{meta.get('saved_at_ist') or meta.get('saved_at', '')}"
+        )
     st.divider()
 
     # Direct buttons only — no "Go to page" dropdown
@@ -15229,11 +15311,14 @@ if scan:
         st.session_state.results = results
         st.session_state.last_run = datetime.now()
 
-        # Save CSV result
-        results.drop(
-            columns=["Data", "News"],
-            errors="ignore",
-        ).to_csv(RESULT_FILE, index=False)
+        # Save CSV so phone/PC on same Cloud URL can share this scan
+        n_saved = save_scan_to_disk(results)
+        st.session_state["_scan_meta"] = {
+            "rows": n_saved,
+            "saved_at_ist": india_now().strftime("%Y-%m-%d %H:%M:%S IST"),
+        }
+        if n_saved:
+            st.caption(f"Shared scan saved on server: **{n_saved}** stocks → use **Reload shared scan** on other device.")
 
         save_recommendations(results)
         evaluate_history()
