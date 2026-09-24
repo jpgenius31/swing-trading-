@@ -48,6 +48,9 @@ STRATEGY_BT_FILE = APP_DIR / "strategy_backtest_results.csv"
 STRATEGY_LIVE_FILE = APP_DIR / "strategy_live_signals.csv"
 STRATEGY_PREV_FILE = APP_DIR / "strategy_live_signals_prev.csv"
 STRATEGY_META_FILE = APP_DIR / "strategy_live_meta.json"
+STRATEGY_ALL_MAP_FILE = APP_DIR / "strategy_all_stocks_map.csv"
+STRATEGY_ALL_SUMMARY_FILE = APP_DIR / "strategy_all_stocks_summary.csv"
+STRATEGY_ALL_META_FILE = APP_DIR / "strategy_all_stocks_meta.json"
 SYNC_VERSION_FILE = APP_DIR / "realtime_sync_version.json"
 MY_STRATEGY_PARAMS_FILE = APP_DIR / "my_strategy_params.json"
 NSE_UNIVERSE_CACHE = APP_DIR / "nse_equity_universe.csv"
@@ -4013,11 +4016,53 @@ My Strategy is **price vs RSI divergence** — it also applies to **index future
 
         if mode.startswith("All strategies"):
             st.info(
-                "Builds a map: every strategy → matching stocks today. "
-                "Takes longer; keep max stocks moderate."
+                "Builds a map once, then **keeps it** on this device (and server). "
+                "Only click Refresh when you want a new scan — not every visit."
             )
             side_f = st.selectbox("Side", ["BUY", "SELL", "BOTH"], key="all_strat_side")
-            if st.button("List stocks under ALL strategies", type="primary", key="list_all_strat_btn"):
+
+            # Load cached map from session or disk (same device / other device)
+            if "stocks_under_all_df" not in st.session_state or st.session_state.get("stocks_under_all_df") is None:
+                try:
+                    if STRATEGY_ALL_MAP_FILE.exists():
+                        st.session_state["stocks_under_all_df"] = pd.read_csv(STRATEGY_ALL_MAP_FILE)
+                    if STRATEGY_ALL_SUMMARY_FILE.exists():
+                        st.session_state["stocks_under_all_summary"] = pd.read_csv(STRATEGY_ALL_SUMMARY_FILE)
+                    if STRATEGY_ALL_META_FILE.exists():
+                        st.session_state["stocks_under_all_meta"] = json.loads(
+                            STRATEGY_ALL_META_FILE.read_text(encoding="utf-8")
+                        )
+                except Exception:
+                    pass
+
+            cached_big = st.session_state.get("stocks_under_all_df")
+            has_cache = isinstance(cached_big, pd.DataFrame) and not cached_big.empty
+            meta_all = st.session_state.get("stocks_under_all_meta") or {}
+            if has_cache:
+                st.success(
+                    f"Saved map ready: **{len(cached_big)}** rows · "
+                    f"{meta_all.get('saved_at_ist', 'earlier')} — no need to scan again"
+                )
+
+            c_run, c_refresh = st.columns(2)
+            with c_run:
+                run_all = st.button(
+                    "List stocks under ALL strategies" if not has_cache else "Show saved map",
+                    type="primary",
+                    key="list_all_strat_btn",
+                    help="Uses saved results if available; does not re-scan unless empty",
+                )
+            with c_refresh:
+                force_rescan = st.button(
+                    "🔄 Refresh scan (re-run)",
+                    key="list_all_strat_refresh",
+                    help="Only when you want a fresh scan",
+                )
+
+            # Show-only: if cache exists and user clicked primary, just stay on cache
+            do_scan = force_rescan or (run_all and not has_cache)
+
+            if do_scan:
                 all_rows = []
                 summary = []
                 buy_ids = [
@@ -4060,7 +4105,6 @@ My Strategy is **price vs RSI divergence** — it also applies to **index future
                         prog.progress((i + 1) / max(len(buy_ids), 1))
                 if all_rows:
                     big = pd.concat(all_rows, ignore_index=True)
-                    # Attach how many strategies each stock matches overall
                     try:
                         counts, alln = [], []
                         for _, rr in big.iterrows():
@@ -4076,6 +4120,20 @@ My Strategy is **price vs RSI divergence** — it also applies to **index future
                         pass
                     st.session_state["stocks_under_all_df"] = big
                     st.session_state["stocks_under_all_summary"] = pd.DataFrame(summary)
+                    meta = {
+                        "rows": int(len(big)),
+                        "side": side_f,
+                        "saved_at_ist": india_now().strftime("%Y-%m-%d %H:%M:%S IST"),
+                    }
+                    st.session_state["stocks_under_all_meta"] = meta
+                    try:
+                        big.to_csv(STRATEGY_ALL_MAP_FILE, index=False)
+                        pd.DataFrame(summary).to_csv(STRATEGY_ALL_SUMMARY_FILE, index=False)
+                        STRATEGY_ALL_META_FILE.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                        bump_sync_version("strategy_all_map")
+                    except Exception:
+                        pass
+                    st.success(f"Map saved — **{len(big)}** rows. Reopen tab anytime without scanning again.")
                 else:
                     st.session_state["stocks_under_all_df"] = pd.DataFrame()
                     st.session_state["stocks_under_all_summary"] = pd.DataFrame(summary)
@@ -4109,8 +4167,8 @@ My Strategy is **price vs RSI divergence** — it also applies to **index future
                         )
                     except Exception:
                         pass
-            elif summary_df is None:
-                st.caption("Click **List stocks under ALL strategies** to build the full map.")
+            else:
+                st.caption("No saved map yet — click **List stocks under ALL strategies** once.")
 
         else:
             # One strategy only (original behaviour)
@@ -15358,39 +15416,143 @@ def read_sync_version() -> dict:
     return {"version": 0, "reason": "", "at_ist": ""}
 
 
-def apply_realtime_sync(force: bool = False) -> bool:
+def refresh_live_prices_all_books(max_per_book: int = 30) -> dict:
     """
-    If server sync version is newer than this session, reload scan / strategy / paper.
-    Returns True if data was refreshed.
+    Update Current / live price on Strategy list, Past Predictions (open), Paper (open).
+    Does NOT change Entry / Target / Stop Loss.
+    """
+    stats = {"scan": 0, "strategy": 0, "history": 0, "paper": 0}
+    # --- Scan results in session ---
+    try:
+        if st.session_state.get("results") is not None and not st.session_state.results.empty:
+            st.session_state.results = update_results_with_live_prices(
+                st.session_state.results, max_stocks=max_per_book
+            )
+            stats["scan"] = min(max_per_book, len(st.session_state.results))
+    except Exception:
+        pass
+
+    # --- Strategy live list (session + disk) ---
+    try:
+        live_df = st.session_state.get("live_strat_df")
+        if live_df is None or (isinstance(live_df, pd.DataFrame) and live_df.empty):
+            if STRATEGY_LIVE_FILE.exists():
+                live_df = pd.read_csv(STRATEGY_LIVE_FILE)
+        if live_df is not None and not live_df.empty:
+            x = live_df.copy()
+            if "Current Price" not in x.columns:
+                x["Current Price"] = pd.to_numeric(x.get("Price"), errors="coerce")
+            n = min(max_per_book, len(x))
+            for idx in list(x.index)[:n]:
+                try:
+                    sym = x.at[idx, "Stock"] if "Stock" in x.columns else x.at[idx, "Symbol"]
+                    q = live_quote(sym)
+                    if q and q.get("price"):
+                        px = round(safe_float(q["price"]), 2)
+                        x.at[idx, "Current Price"] = px
+                        if "Price" in x.columns:
+                            x.at[idx, "Price"] = px
+                        stats["strategy"] += 1
+                except Exception:
+                    continue
+            st.session_state["live_strat_df"] = x
+            try:
+                x.to_csv(STRATEGY_LIVE_FILE, index=False)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # --- Past predictions open rows ---
+    try:
+        refresh_history_current_prices(max_stocks=max_per_book)
+        stats["history"] = max_per_book
+    except Exception:
+        pass
+
+    # --- Paper open trades: Current Price + unrealized P&L ---
+    try:
+        paper = load_paper_portfolio()
+        if paper is not None and not paper.empty:
+            if "Current Price" not in paper.columns:
+                paper["Current Price"] = ""
+            status_u = paper["Status"].astype(str).str.upper() if "Status" in paper.columns else pd.Series(["OPEN"] * len(paper))
+            open_idx = paper.index[status_u != "CLOSED"].tolist()[:max_per_book]
+            for idx in open_idx:
+                try:
+                    sym = paper.at[idx, "Stock"]
+                    q = live_quote(sym)
+                    px = None
+                    if q and q.get("price"):
+                        px = safe_float(q["price"])
+                    if not px:
+                        d = stock_history(clean_symbol(sym), interval="1d")
+                        if d is not None and not d.empty:
+                            px = safe_float(d["Close"].iloc[-1])
+                    if not px:
+                        continue
+                    paper.at[idx, "Current Price"] = round(px, 2)
+                    entry = safe_float(paper.at[idx, "Entry"])
+                    shares = safe_int(paper.at[idx, "Shares"], 1) or 1
+                    side = str(paper.at[idx, "Side"] if "Side" in paper.columns else "BUY").upper()
+                    if entry > 0:
+                        if "SELL" in side:
+                            ret = (entry - px) / entry * 100
+                        else:
+                            ret = (px - entry) / entry * 100
+                        # Only update MTM for still-open (don't overwrite closed result %)
+                        if str(paper.at[idx, "Status"]).upper() != "CLOSED":
+                            paper.at[idx, "Return %"] = round(ret, 2)
+                            paper.at[idx, "PnL ₹"] = round(shares * entry * ret / 100, 2)
+                    stats["paper"] += 1
+                except Exception:
+                    continue
+            save_paper_portfolio(paper)
+    except Exception:
+        pass
+
+    st.session_state["_last_price_refresh"] = india_now().strftime("%H:%M:%S IST")
+    return stats
+
+
+def apply_realtime_sync(force: bool = False, refresh_prices: bool = True) -> bool:
+    """
+    Reload shared files when version advances; optionally refresh live prices every time.
     """
     remote = read_sync_version()
     remote_v = int(remote.get("version") or 0)
     local_v = int(st.session_state.get("_sync_version_seen", 0) or 0)
-    if not force and remote_v <= local_v:
-        return False
+    data_changed = force or remote_v > local_v
     changed = False
-    try:
-        n = load_scan_from_disk(force=True)
-        if n:
+    if data_changed:
+        try:
+            n = load_scan_from_disk(force=True)
+            if n:
+                changed = True
+        except Exception:
+            pass
+        try:
+            df = load_strategy_snapshot(force=True)
+            if df is not None and not getattr(df, "empty", True):
+                changed = True
+        except Exception:
+            pass
+        try:
+            if PAPER_FILE.exists() or HISTORY_FILE.exists():
+                changed = True
+        except Exception:
+            pass
+        st.session_state["_sync_version_seen"] = remote_v
+        st.session_state["_sync_last_reason"] = remote.get("reason", "")
+        st.session_state["_sync_last_at"] = remote.get("at_ist", "")
+
+    if refresh_prices:
+        try:
+            refresh_live_prices_all_books(max_per_book=25)
             changed = True
-    except Exception:
-        pass
-    try:
-        df = load_strategy_snapshot(force=True)
-        if df is not None and not getattr(df, "empty", True):
-            changed = True
-    except Exception:
-        pass
-    try:
-        # Paper / history are read from disk on each page; bump session marker only
-        if PAPER_FILE.exists() or HISTORY_FILE.exists():
-            changed = True
-    except Exception:
-        pass
-    st.session_state["_sync_version_seen"] = remote_v
-    st.session_state["_sync_last_reason"] = remote.get("reason", "")
-    st.session_state["_sync_last_at"] = remote.get("at_ist", "")
-    return changed or force
+        except Exception:
+            pass
+    return changed
 
 
 def save_strategy_snapshot(live_df: pd.DataFrame) -> dict:
@@ -15773,9 +15935,18 @@ with st.sidebar:
             f"Server v**{remote.get('version', 0)}** · {remote.get('reason', '—')} · "
             f"{remote.get('at_ist', '')}"
         )
-        if st.button("⚡ Sync now", use_container_width=True, key="sync_now_btn"):
-            if apply_realtime_sync(force=True):
-                st.success("Synced from server.")
+        if st.button("⚡ Sync now + prices", use_container_width=True, key="sync_now_btn"):
+            apply_realtime_sync(force=True, refresh_prices=True)
+            st.success(
+                f"Synced · prices @ {st.session_state.get('_last_price_refresh', 'now')}"
+            )
+            st.rerun()
+        if st.button("💹 Refresh prices only", use_container_width=True, key="prices_only_btn"):
+            stats = refresh_live_prices_all_books(max_per_book=40)
+            st.success(
+                f"Prices updated · strategy {stats.get('strategy', 0)} · "
+                f"history {stats.get('history', 0)} · paper {stats.get('paper', 0)}"
+            )
             st.rerun()
 
     if st.button("🔄 Manual refresh now", use_container_width=True, type="primary"):
@@ -16453,18 +16624,17 @@ elif st.session_state.page == "Stock Analysis":
 # LIVE SYNC + AUTO REFRESH
 # ============================================================
 
-# Near real-time multi-device sync (version file on server)
+# Near real-time multi-device sync + live prices
 if st.session_state.get("live_sync", False):
     _sync_secs = int(st.session_state.get("live_sync_secs", 5) or 5)
     try:
-        remote = read_sync_version()
-        remote_v = int(remote.get("version") or 0)
-        local_v = int(st.session_state.get("_sync_version_seen", 0) or 0)
-        if remote_v > local_v:
-            apply_realtime_sync(force=True)
-            st.session_state["_sync_version_seen"] = remote_v
+        # Always refresh prices; also pull shared files if version advanced
+        apply_realtime_sync(force=False, refresh_prices=True)
     except Exception:
         pass
+    _lp = st.session_state.get("_last_price_refresh", "")
+    if _lp:
+        st.caption(f"Live prices refreshed · {_lp}")
     st.markdown(
         f"""
         <script>
