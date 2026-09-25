@@ -1411,6 +1411,18 @@ def render_call_stock_card(row, section_key: str = "card"):
         cap_color = "#d97706"
     else:
         cap_color = "#64748b"
+    # Risk / reward strip for trader
+    try:
+        _qc = trade_quality_check(price, tgt, sl, call if call in ("BUY", "SELL") else "BUY", min_rr=1.5)
+        if _qc.get("ok"):
+            _rr_html = (
+                f"✅ <b>{_qc['label']}</b> · risk <b style='color:#f87171;'>₹{_qc['risk_rs']:,.0f}</b> · "
+                f"reward <b style='color:#4ade80;'>₹{_qc['reward_rs']:,.0f}</b> · {_qc['shares']} sh"
+            )
+        else:
+            _rr_html = "⛔ <b>" + (_qc.get("label") or "BLOCKED") + "</b> · " + " · ".join((_qc.get("reasons") or [])[:2])
+    except Exception:
+        _rr_html = "R:R —"
     st.markdown(
         f"""
         <div style="border:2px solid {border};border-radius:14px;padding:14px 16px;margin:10px 0;
@@ -1439,6 +1451,9 @@ def render_call_stock_card(row, section_key: str = "card"):
           </div>
           <div style="margin-top:8px;color:#94a3b8;font-size:0.88rem;"><b>Index:</b> {idx_txt}{(' · <b>Result:</b> '+result) if result else ''}</div>
           <div style="margin-top:4px;color:#a5b4fc;font-size:0.88rem;"><b>LT:</b> {lt_line or '—'}</div>
+          <div style="margin-top:8px;padding:8px 10px;border-radius:8px;background:#020617;border:1px solid #334155;">
+            <span style="color:#e2e8f0;font-size:0.9rem;">{_rr_html}</span>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -5177,19 +5192,28 @@ def analyse_stock(
 
     if signal == "SELL":
         # Short / sell: profit when price falls → target below, stop above
-        target = price - 2.5 * atr_value
+        # Keep R:R ≥ 1.5 (reward 2.5 ATR vs risk 1.5 ATR ≈ 1.67)
         stop_loss = price + 1.5 * atr_value
+        target = price - 2.5 * atr_value
         if target <= 0:
             target = price * 0.92
+        # Enforce min R:R 1.5
+        risk_ps = abs(stop_loss - price)
+        if risk_ps > 0 and (price - target) / risk_ps < 1.5:
+            target = price - 1.5 * risk_ps
         reasons.append(
-            f"SELL levels: Target ₹{target:.2f} (below price) · Stop ₹{stop_loss:.2f} (above price)."
+            f"SELL levels: Target ₹{target:.2f} (below) · Stop ₹{stop_loss:.2f} (above) · R:R≥1.5."
         )
     else:
-        # BUY / HOLD / WATCH: long levels
+        # BUY / HOLD / WATCH: long levels — R:R ≥ 1.5 always
         stop_loss = price - 1.5 * atr_value
         if stop_loss <= 0:
             stop_loss = price * 0.95
-        target = price + 2.5 * atr_value
+        risk_ps = abs(price - stop_loss)
+        target = price + max(2.5 * atr_value, 1.5 * risk_ps)
+        reasons.append(
+            f"BUY levels: Target ₹{target:.2f} · Stop ₹{stop_loss:.2f} · R:R≥1.5 enforced."
+        )
 
     risk_pct = abs(price - stop_loss) / price * 100 if price > 0 else 0
     if risk_pct < 3:
@@ -5200,6 +5224,16 @@ def analyse_stock(
         risk_level = "HIGH"
     else:
         risk_level = "VERY HIGH"
+
+    # Gate BUY if quality still fails (should be rare after stretch)
+    if signal == "BUY":
+        _tq = trade_quality_check(price, target, stop_loss, "BUY", min_rr=1.5)
+        if not _tq.get("ok"):
+            signal = "WATCH"
+            prediction = min(prediction, 68)
+            reasons.append("BUY→WATCH: " + " · ".join(_tq.get("reasons", [])[:2]))
+        else:
+            reasons.append(f"Trade quality: {_tq.get('label')} · risk ₹{_tq.get('risk_rs', 0):.0f}")
 
     # Expected move % (direction-aware)
     if signal == "SELL":
@@ -7972,6 +8006,94 @@ def sync_outcomes_across_books(force_paper: bool = True) -> dict:
     return stats
 
 
+def trade_quality_check(
+    entry: float,
+    target: float,
+    stop: float,
+    side: str = "BUY",
+    min_rr: float = 1.5,
+    capital: float = 50000.0,
+    risk_pct_capital: float = 1.0,
+) -> dict:
+    """
+    Block weak trades: Stop must be valid; Reward/Risk >= min_rr (default 1.5).
+    Returns ok, rr, risk_rs (₹ at stop for sized shares), reward_rs, shares, reasons.
+    """
+    side = str(side or "BUY").upper()
+    entry = safe_float(entry)
+    target = safe_float(target)
+    stop = safe_float(stop)
+    out = {
+        "ok": False,
+        "rr": 0.0,
+        "risk_per_share": 0.0,
+        "reward_per_share": 0.0,
+        "risk_rs": 0.0,
+        "reward_rs": 0.0,
+        "shares": 0,
+        "reasons": [],
+        "label": "BLOCKED",
+    }
+    if entry <= 0:
+        out["reasons"].append("No valid entry price")
+        return out
+    if stop <= 0:
+        out["reasons"].append("Stop Loss is 0 or missing — never trade without a stop")
+        return out
+    if target <= 0:
+        out["reasons"].append("Target is 0 or missing")
+        return out
+
+    if "SELL" in side:
+        if target >= entry:
+            out["reasons"].append("SELL: Target must be below Entry")
+            return out
+        if stop <= entry:
+            out["reasons"].append("SELL: Stop must be above Entry")
+            return out
+        risk_ps = stop - entry
+        reward_ps = entry - target
+    else:
+        if target <= entry:
+            out["reasons"].append("BUY: Target must be above Entry")
+            return out
+        if stop >= entry:
+            out["reasons"].append("BUY: Stop must be below Entry")
+            return out
+        risk_ps = entry - stop
+        reward_ps = target - entry
+
+    if risk_ps <= 0:
+        out["reasons"].append("Risk per share is zero")
+        return out
+
+    rr = reward_ps / risk_ps
+    out["rr"] = round(rr, 2)
+    out["risk_per_share"] = round(risk_ps, 2)
+    out["reward_per_share"] = round(reward_ps, 2)
+
+    risk_budget = capital * (risk_pct_capital / 100.0)
+    shares = max(1, int(risk_budget / risk_ps))
+    out["shares"] = shares
+    out["risk_rs"] = round(shares * risk_ps, 2)
+    out["reward_rs"] = round(shares * reward_ps, 2)
+
+    if rr + 1e-9 < min_rr:
+        out["reasons"].append(
+            f"R:R {rr:.2f} < {min_rr:.1f} — skip (need reward ≥ {min_rr}× risk)"
+        )
+        out["label"] = f"WEAK R:R {rr:.2f}"
+        return out
+
+    out["ok"] = True
+    out["label"] = f"R:R {rr:.2f} ✓"
+    out["reasons"].append(
+        f"OK · R:R {rr:.2f} · risk ₹{out['risk_rs']:,.0f} · "
+        f"reward ₹{out['reward_rs']:,.0f} · {shares} shares (1% capital risk)"
+    )
+    return out
+
+
 def execute_paper_order(
     stock: str,
     side: str = "BUY",
@@ -7983,17 +8105,20 @@ def execute_paper_order(
     hold_days: int = 15,
     risk_pct: float = 1.0,
     capital: float = 50000.0,
+    force: bool = False,
 ) -> dict:
     """
     Execute paper BUY/SELL from any page.
-    Auto-fills live price, target, stop; sizes shares from risk if shares=0.
-    Appears immediately in Paper Trading portfolio.
+    Blocks if Stop invalid or R:R < 1.5 (unless force=True).
+    Sizes shares from 1% capital risk to stop when shares=0.
     """
     stock = display_symbol(stock)
     side = str(side or "BUY").upper()
     if side not in ("BUY", "SELL"):
         side = "BUY"
-    # Live entry
+    capital = safe_float(st.session_state.get("paper_capital", capital), capital) or 50000.0
+    risk_pct = safe_float(st.session_state.get("paper_risk_pct", risk_pct), risk_pct) or 1.0
+
     if entry <= 0:
         try:
             q = live_quote(stock)
@@ -8011,7 +8136,7 @@ def execute_paper_order(
     if entry <= 0:
         return {"ok": False, "msg": f"No price for {stock}"}
 
-    # Default target/stop from ATR if missing
+    # Default target/stop from ATR if missing — always enforce RR ≥ 1.5
     if target <= 0 or stop <= 0:
         try:
             d = stock_history(clean_symbol(stock), interval="1d")
@@ -8019,31 +8144,47 @@ def execute_paper_order(
                 d = calculate_indicators(d)
                 atr = safe_float(d.iloc[-1].get("ATR")) or entry * 0.02
                 if side == "BUY":
-                    if target <= 0:
-                        target = round(entry + 2.0 * atr, 2)
                     if stop <= 0:
                         stop = round(entry - 1.2 * atr, 2)
-                else:
                     if target <= 0:
-                        target = round(entry - 2.0 * atr, 2)
+                        target = round(entry + 1.5 * max(entry - stop, 1.2 * atr), 2)
+                else:
                     if stop <= 0:
                         stop = round(entry + 1.2 * atr, 2)
+                    if target <= 0:
+                        target = round(entry - 1.5 * max(stop - entry, 1.2 * atr), 2)
         except Exception:
             if side == "BUY":
-                target = target or round(entry * 1.04, 2)
-                stop = stop or round(entry * 0.97, 2)
+                stop = stop if stop > 0 else round(entry * 0.97, 2)
+                target = target if target > 0 else round(entry * 1.05, 2)
             else:
-                target = target or round(entry * 0.96, 2)
-                stop = stop or round(entry * 1.03, 2)
+                stop = stop if stop > 0 else round(entry * 1.03, 2)
+                target = target if target > 0 else round(entry * 0.95, 2)
 
-    # Position size from risk % of capital to stop
+    # Stretch target to min RR if stop valid but RR weak
+    qcheck = trade_quality_check(entry, target, stop, side, min_rr=1.5, capital=capital, risk_pct_capital=risk_pct)
+    if not qcheck["ok"] and not force:
+        # Try auto-fix target once for valid direction/stop
+        if qcheck["risk_per_share"] > 0 and stop > 0:
+            if side == "BUY" and stop < entry:
+                target = round(entry + 1.5 * (entry - stop), 2)
+                qcheck = trade_quality_check(entry, target, stop, side, min_rr=1.5, capital=capital, risk_pct_capital=risk_pct)
+            elif side == "SELL" and stop > entry:
+                target = round(entry - 1.5 * (stop - entry), 2)
+                qcheck = trade_quality_check(entry, target, stop, side, min_rr=1.5, capital=capital, risk_pct_capital=risk_pct)
+        if not qcheck["ok"]:
+            return {
+                "ok": False,
+                "msg": "Blocked: " + " · ".join(qcheck["reasons"][:3]),
+                "quality": qcheck,
+            }
+
     if shares <= 0:
-        risk_amt = capital * (risk_pct / 100.0)
-        per_share_risk = abs(entry - stop)
-        if per_share_risk > 0:
-            shares = max(1, int(risk_amt / per_share_risk))
-        else:
-            shares = max(1, int(capital * 0.1 / entry))
+        shares = int(qcheck.get("shares") or 0)
+        if shares <= 0:
+            risk_amt = capital * (risk_pct / 100.0)
+            per_share_risk = abs(entry - stop)
+            shares = max(1, int(risk_amt / per_share_risk)) if per_share_risk > 0 else 1
 
     row = {
         "Open Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -8061,6 +8202,8 @@ def execute_paper_order(
         "Exit Price": "",
         "Return %": "",
         "PnL ₹": "",
+        "R:R": qcheck.get("rr", ""),
+        "Risk ₹": qcheck.get("risk_rs", ""),
     }
     paper = load_paper_portfolio()
     paper = pd.concat([paper, pd.DataFrame([row])], ignore_index=True)
@@ -8069,9 +8212,11 @@ def execute_paper_order(
         "ok": True,
         "msg": (
             f"{side} {shares} × {stock} @ ₹{entry:,.2f} | "
-            f"T ₹{target:,.2f} | SL ₹{stop:,.2f} → Paper portfolio"
+            f"T ₹{target:,.2f} | SL ₹{stop:,.2f} | "
+            f"R:R {qcheck.get('rr', '—')} | risk ₹{qcheck.get('risk_rs', 0):,.0f} → Paper"
         ),
         "row": row,
+        "quality": qcheck,
     }
 
 
@@ -8083,11 +8228,36 @@ def render_active_trade_buttons(
     stop: float = 0.0,
     key_prefix: str = "tr",
 ):
-    """Active BUY / SELL / Open analysis buttons — execute paper orders."""
+    """Active BUY / SELL buttons — show R:R & risk ₹; block weak R:R."""
     stock = display_symbol(stock)
+    capital = safe_float(st.session_state.get("paper_capital", 50000), 50000) or 50000
+    risk_pct = safe_float(st.session_state.get("paper_risk_pct", 1.0), 1.0) or 1.0
+    q_buy = trade_quality_check(entry, target, stop, "BUY", min_rr=1.5, capital=capital, risk_pct_capital=risk_pct)
+    # For SELL levels may be long-style on card — recompute if needed
+    q_sell = trade_quality_check(
+        entry,
+        target if target < entry else 0,
+        stop if stop > entry else 0,
+        "SELL",
+        min_rr=1.5,
+        capital=capital,
+        risk_pct_capital=risk_pct,
+    )
+
+    if entry > 0:
+        if q_buy["ok"]:
+            st.caption(
+                f"✅ BUY quality: **{q_buy['label']}** · "
+                f"risk **₹{q_buy['risk_rs']:,.0f}** · reward **₹{q_buy['reward_rs']:,.0f}** · "
+                f"**{q_buy['shares']}** shares"
+            )
+        else:
+            st.caption("⛔ BUY blocked: " + " · ".join(q_buy["reasons"][:2]))
+
     b1, b2, b3, b4 = st.columns(4)
     with b1:
-        if st.button(f"🟢 BUY {stock}", key=f"{key_prefix}_buy_{stock}", use_container_width=True):
+        buy_label = f"🟢 BUY {stock}" if q_buy["ok"] else f"⛔ BUY blocked"
+        if st.button(buy_label, key=f"{key_prefix}_buy_{stock}", use_container_width=True, disabled=not q_buy["ok"]):
             r = execute_paper_order(
                 stock, "BUY", entry=entry, target=target, stop=stop,
                 source=f"{side_hint}|{key_prefix}",
@@ -8097,7 +8267,9 @@ def render_active_trade_buttons(
             else:
                 st.error(r.get("msg", "Order failed"))
     with b2:
-        if st.button(f"🔴 SELL {stock}", key=f"{key_prefix}_sell_{stock}", use_container_width=True):
+        sell_ok = q_sell["ok"]
+        sell_label = f"🔴 SELL {stock}" if sell_ok else f"🔴 SELL {stock}"
+        if st.button(sell_label, key=f"{key_prefix}_sell_{stock}", use_container_width=True):
             r = execute_paper_order(
                 stock, "SELL", entry=entry,
                 target=target if target and target < entry else 0,
@@ -8362,6 +8534,25 @@ def show_paper_trading():
         filterable_dataframe(view, key="paper_book_table", default_cols=show_cols, height=320)
 
     st.subheader("➕ New paper trade")
+    st.caption("Blocked if Stop ≤ 0 or R:R &lt; 1.5. Shares sized to ~1% capital risk.")
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        st.session_state["paper_capital"] = st.number_input(
+            "Capital ₹ (for sizing)",
+            min_value=1000.0,
+            value=float(st.session_state.get("paper_capital", 50000) or 50000),
+            step=1000.0,
+            key="paper_capital_input",
+        )
+    with pc2:
+        st.session_state["paper_risk_pct"] = st.number_input(
+            "Risk % of capital / trade",
+            min_value=0.25,
+            max_value=5.0,
+            value=float(st.session_state.get("paper_risk_pct", 1.0) or 1.0),
+            step=0.25,
+            key="paper_risk_pct_input",
+        )
     c1, c2, c3 = st.columns(3)
     with c1:
         stock = st.text_input("NSE Symbol", value="", key="paper_sym").upper().strip()
@@ -8423,35 +8614,32 @@ def show_paper_trading():
 
     notes = st.text_input("Notes (optional)", key="paper_notes")
 
+    _qc_preview = trade_quality_check(entry, target, stop, side, min_rr=1.5)
+    if entry > 0 and stock:
+        if _qc_preview.get("ok"):
+            st.info(
+                f"Quality OK · {_qc_preview['label']} · "
+                f"risk ₹{_qc_preview['risk_rs']:,.0f} · reward ₹{_qc_preview['reward_rs']:,.0f} · "
+                f"suggested shares {_qc_preview['shares']}"
+            )
+        else:
+            st.error("Cannot add: " + " · ".join(_qc_preview.get("reasons", [])[:3]))
+
     if st.button("Add to paper portfolio", type="primary", key="paper_add"):
         if not stock or entry <= 0:
             st.error("Enter symbol and entry price.")
-        elif side == "SELL" and target >= entry:
-            st.error("Fix SELL target (must be < entry).")
         else:
-            tid = f"{stock}|{datetime.now().strftime('%Y%m%d%H%M%S')}|{side}"
-            new_row = {
-                "Trade ID": tid,
-                "Open Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Stock": display_symbol(stock),
-                "Side": side,
-                "Shares": int(shares),
-                "Entry": round(entry, 2),
-                "Target": round(target, 2),
-                "Stop Loss": round(stop, 2),
-                "Hold Days": int(hold_days),
-                "Status": "OPEN",
-                "Result": "PENDING",
-                "Exit Date": "",
-                "Exit Price": "",
-                "Return %": "",
-                "PnL ₹": "",
-                "Notes": notes,
-            }
-            paper = pd.concat([paper, pd.DataFrame([new_row])], ignore_index=True)
-            save_paper_portfolio(paper)
-            st.success(f"Paper trade added: {side} {stock} @ ₹{entry:,.2f}")
-            st.rerun()
+            r = execute_paper_order(
+                stock, side, entry=entry, target=target, stop=stop,
+                shares=int(shares) if shares else 0,
+                source="Manual paper",
+                hold_days=int(hold_days),
+            )
+            if r.get("ok"):
+                st.success(r["msg"])
+                st.rerun()
+            else:
+                st.error(r.get("msg", "Blocked by R:R / stop rules"))
 
     st.divider()
     st.subheader("📋 Paper portfolio")
